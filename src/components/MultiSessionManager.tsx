@@ -4,7 +4,8 @@ import {
   RotateCw,
   Globe,
   ClipboardPaste,
-  LogIn
+  LogIn,
+  Pickaxe
 } from 'lucide-react';
 
 export interface SessionTab {
@@ -44,6 +45,7 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
   const [activeTabId, setActiveTabId] = useState<number>(1);
   const [isReloadingAll, setIsReloadingAll] = useState<boolean>(false);
   const [isSubmittingAll, setIsSubmittingAll] = useState<boolean>(false);
+  const [isMiningAll, setIsMiningAll] = useState<boolean>(false);
 
   // All session tabs list - initialized with 10 tabs, only Tab 1 loads startUrl initially
   const [tabs, setTabs] = useState<SessionTab[]>(() => {
@@ -235,6 +237,85 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
     }, 1500);
     setTimeout(() => {
       setBulkStatus('✓ Login triggered in all tabs');
+    }, 1000);
+    setTimeout(() => {
+      setBulkStatus('');
+    }, 4500);
+  };
+
+  // Trigger "START FREE MINING" button across all tabs in 1 click
+  const handleTriggerAllMining = () => {
+    setIsMiningAll(true);
+    setBulkStatus(`⛏️ Triggering Start Mining in all ${tabs.length} tabs...`);
+
+    tabs.forEach((tab) => {
+      if (!tab.url) return;
+      const iframe = document.getElementById(`multi-tab-frame-${tab.id}`) as HTMLIFrameElement | null;
+      if (iframe) {
+        // 1. Post message to bridge script inside iframe
+        try {
+          iframe.contentWindow?.postMessage(
+            {
+              type: 'TRIGGER_START_MINING',
+              sessionId: tab.sessionId
+            },
+            '*'
+          );
+        } catch (e) {}
+
+        // 2. Direct DOM execution (same-origin iframe fallback)
+        try {
+          const doc = iframe.contentDocument || iframe.contentWindow?.document;
+          if (doc) {
+            const specificBtn = doc.querySelector(
+              'a.free-btn, a.btn-start-mining, a[href*="order_ids="], a[href*="free_mining"], button.free-btn, #startMiningBtn, .mining_btn a'
+            ) as HTMLElement | null;
+
+            if (specificBtn) {
+              specificBtn.click();
+              const rawHref = specificBtn.getAttribute('href');
+              if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
+                try {
+                  const targetResolved = new URL(rawHref, doc.baseURI || tab.url).href;
+                  const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetResolved)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
+                  iframe.src = proxyUrl;
+                } catch (e) {}
+              }
+            } else {
+              const allCandidates = Array.from(
+                doc.querySelectorAll('a, button, [role="button"], input[type="button"]')
+              );
+              const textBtn = allCandidates.find((el) => {
+                const txt = (el.textContent || (el as HTMLInputElement).value || '').trim().toLowerCase();
+                return (
+                  txt.includes('start free mining') ||
+                  txt.includes('free mining') ||
+                  txt.includes('start mining')
+                );
+              }) as HTMLElement | null;
+
+              if (textBtn) {
+                textBtn.click();
+                const rawHref = textBtn.getAttribute('href');
+                if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
+                  try {
+                    const targetResolved = new URL(rawHref, doc.baseURI || tab.url).href;
+                    const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetResolved)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
+                    iframe.src = proxyUrl;
+                  } catch (e) {}
+                }
+              }
+            }
+          }
+        } catch (e) {}
+      }
+    });
+
+    setTimeout(() => {
+      setIsMiningAll(false);
+    }, 1500);
+    setTimeout(() => {
+      setBulkStatus('✓ Free Mining triggered in all tabs');
     }, 1000);
     setTimeout(() => {
       setBulkStatus('');
@@ -641,6 +722,19 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
         >
           <LogIn className={`w-3.5 h-3.5 ${isSubmittingAll ? 'animate-bounce' : ''}`} />
           <span>{isSubmittingAll ? 'Logging in...' : 'Login All'}</span>
+        </button>
+
+        {/* Mine Button right next to Login button: 1 tap triggers START FREE MINING in all tabs */}
+        <button
+          id="btn-mine-all-tabs"
+          type="button"
+          onClick={handleTriggerAllMining}
+          disabled={isMiningAll}
+          className="h-7 px-3 rounded bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-mono text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer shadow-md transition-all active:scale-95 disabled:opacity-50"
+          title="1 tap me sabhi tabs me 'START FREE MINING' trigger karein (Trigger Start Free Mining in All Tabs)"
+        >
+          <Pickaxe className={`w-3.5 h-3.5 ${isMiningAll ? 'animate-bounce text-emerald-200' : ''}`} />
+          <span>{isMiningAll ? 'Mining...' : 'Mine All'}</span>
         </button>
 
         <div className="h-4 w-px bg-neutral-800 shrink-0" />

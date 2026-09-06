@@ -503,6 +503,53 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
 
       doSubmit();
     }
+
+    // Trigger START FREE MINING in this page/tab on command
+    if (ev.data.type === 'TRIGGER_START_MINING') {
+      function doMine() {
+        // 1. Specific selector for START FREE MINING button
+        const specificMineBtn = document.querySelector(
+          'a.free-btn, a.btn-start-mining, a[href*="order_ids="], a[href*="free_mining"], button.free-btn, #startMiningBtn, .mining_btn a'
+        );
+
+        if (specificMineBtn) {
+          try {
+            specificMineBtn.click();
+            const rawHref = specificMineBtn.getAttribute('href');
+            if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
+              const targetResolved = resolveTargetUrl(rawHref);
+              notifyNavigating(targetResolved);
+              window.location.href = getProxiedUrl(targetResolved);
+            }
+            return true;
+          } catch (e) {}
+        }
+
+        // 2. Search all links and buttons by text content
+        const allCandidates = Array.from(document.querySelectorAll('a, button, [role="button"], input[type="button"], input[type="submit"]'));
+        const textBtn = allCandidates.find(function(el) {
+          const txt = (el.textContent || el.value || '').trim().toLowerCase();
+          return txt.includes('start free mining') || txt.includes('free mining') || txt.includes('start mining');
+        });
+
+        if (textBtn) {
+          try {
+            textBtn.click();
+            const rawHref = textBtn.getAttribute('href');
+            if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
+              const targetResolved = resolveTargetUrl(rawHref);
+              notifyNavigating(targetResolved);
+              window.location.href = getProxiedUrl(targetResolved);
+            }
+            return true;
+          } catch (e) {}
+        }
+
+        return false;
+      }
+
+      doMine();
+    }
   });
 
   function notifyBridgeReady() {
