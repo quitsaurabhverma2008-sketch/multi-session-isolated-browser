@@ -2,15 +2,66 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Isolated Browser &amp; Real-time DOM Inspector</title>
-    <meta name="description" content="An isolated in-browser environment featuring interactive website sessions alongside live real-time HTML source inspection and DOM change tracking." />
-    <meta property="og:title" content="Isolated Browser &amp; Real-time DOM Inspector" />
-    <meta property="og:description" content="An isolated in-browser environment featuring interactive website sessions alongside live real-time HTML source inspection and DOM change tracking." />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+    
+    <!-- Primary SEO Meta Tags -->
+    <title>Isolated Browser &amp; Real-time DOM Inspector | View Website Source Code</title>
+    <meta name="title" content="Isolated Browser &amp; Real-time DOM Inspector | View Website Source Code" />
+    <meta name="description" content="Real-time in-browser website source code viewer and mobile HTML inspector supporting up to 50 concurrent tabs, live DOM tracking, and session isolation." />
+    <meta name="keywords" content="view source code, website source code viewer, live html inspector, mobile dom viewer, real-time html inspector, view source mobile, multi tab web inspector, inspect element online, website code debugger" />
+    <meta name="author" content="Isolated Browser Team" />
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1" />
+    
+    <!-- Mobile & PWA App Experience Tags -->
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Source Viewer" />
+    <meta name="application-name" content="Isolated Browser &amp; Real-time DOM Inspector" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- Open Graph / Facebook -->
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Isolated Browser &amp; Real-time DOM Inspector" />
+    <meta property="og:title" content="Isolated Browser &amp; Real-time DOM Inspector | View Website Source Code" />
+    <meta property="og:description" content="Real-time in-browser website source code viewer and mobile HTML inspector supporting up to 50 concurrent tabs, live DOM tracking, and session isolation." />
+    <meta property="og:image" content="/assets/demo-preview.jpg" />
+    <meta property="og:locale" content="en_US" />
+
+    <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Isolated Browser &amp; Real-time DOM Inspector | View Website Source Code" />
+    <meta name="twitter:description" content="Real-time in-browser website source code viewer and mobile HTML inspector supporting up to 50 concurrent tabs, live DOM tracking, and session isolation." />
+    <meta name="twitter:image" content="/assets/demo-preview.jpg" />
+
+    <!-- Structured Data (JSON-LD Schema) for Google Search Rich Results -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "Isolated Browser & Real-time DOM Inspector",
+      "alternateName": "Real-time Website Source Code Viewer",
+      "description": "An in-browser website source code viewer and developer inspector that streams live HTML code in real-time with multi-tab support for up to 50 sessions.",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "All (Web, Android, iOS, Windows, macOS, Linux)",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "featureList": [
+        "Real-time live HTML source code viewer",
+        "Supports up to 50 concurrent isolated browser tabs",
+        "Live DOM mutation tracking and inspector",
+        "Mobile-optimized touch interface",
+        "Zero-flicker background credential pasting",
+        "Bypasses iframe restrictions and CSP blocks"
+      ]
+    }
+    </script>
   </head>
-  <body>
+  <body class="bg-black text-white">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

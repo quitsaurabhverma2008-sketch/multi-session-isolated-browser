@@ -1,6 +1,6 @@
 {
   "name": "Isolated Browser & Real-time DOM Inspector",
-  "description": "An isolated in-browser environment featuring interactive website sessions alongside live real-time HTML source inspection and DOM change tracking.",
+  "description": "Real-time in-browser website source code viewer and mobile HTML inspector supporting up to 50 concurrent tabs, live DOM tracking, and session isolation.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
