@@ -41,6 +41,7 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
 
   // Active selected tab number (starts at 1)
   const [activeTabId, setActiveTabId] = useState<number>(1);
+  const [isReloadingAll, setIsReloadingAll] = useState<boolean>(false);
 
   // All session tabs list - initialized with 10 tabs, only Tab 1 loads startUrl initially
   const [tabs, setTabs] = useState<SessionTab[]>(() => {
@@ -123,6 +124,41 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
         isLoading: true
       }))
     );
+  };
+
+  // Reload all tabs concurrently in 1 click
+  const handleReloadAllTabs = () => {
+    setIsReloadingAll(true);
+    setTabs((prev) =>
+      prev.map((t) => (t.url ? { ...t, isLoading: true } : t))
+    );
+
+    tabs.forEach((tab) => {
+      if (!tab.url) return;
+      const iframe = document.getElementById(`multi-tab-frame-${tab.id}`) as HTMLIFrameElement | null;
+      if (iframe) {
+        try {
+          if (iframe.contentWindow) {
+            iframe.contentWindow.location.reload();
+          } else {
+            throw new Error('No content window');
+          }
+        } catch {
+          const proxySrc = getTabProxySrc(tab);
+          if (proxySrc) {
+            iframe.src = proxySrc;
+          }
+        }
+      }
+    });
+
+    setBulkStatus(`✓ Reloading all ${tabs.length} tabs...`);
+    setTimeout(() => {
+      setIsReloadingAll(false);
+    }, 1500);
+    setTimeout(() => {
+      setBulkStatus('');
+    }, 4000);
   };
 
   // Reload the active tab safely without re-rendering all other tabs
@@ -484,18 +520,30 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
           )}
         </div>
 
-        {/* Reload Tab */}
-        <div className="flex items-center gap-2 shrink-0 text-xs font-mono text-neutral-400">
+        {/* Reload Controls: 1-Click Reload All Tabs & Single Tab Reload */}
+        <div className="flex items-center gap-1.5 shrink-0 text-xs font-mono">
+          <button
+            id="btn-reload-all-tabs"
+            onClick={handleReloadAllTabs}
+            className="h-7 px-2.5 rounded bg-sky-950/80 hover:bg-sky-900 text-sky-300 hover:text-white border border-sky-700/80 flex items-center gap-1.5 cursor-pointer transition-all font-medium shadow-sm active:scale-95"
+            title="1 click me sabhi tabs reload karein (Reload All Tabs)"
+          >
+            <RotateCw
+              className={`w-3.5 h-3.5 ${isReloadingAll ? 'animate-spin text-sky-400' : 'text-sky-300'}`}
+            />
+            <span className="text-[11px] font-semibold">Reload All ({tabs.length})</span>
+          </button>
+
           <button
             id="btn-reload-active-tab"
             onClick={handleReloadActiveTab}
-            className="h-7 px-2.5 rounded bg-neutral-950 hover:bg-neutral-900 text-neutral-400 hover:text-white border border-neutral-800 flex items-center gap-1 cursor-pointer transition-colors"
-            title={`Reload Tab ${activeTabId}`}
+            className="h-7 px-2 rounded bg-neutral-950 hover:bg-neutral-900 text-neutral-400 hover:text-neutral-200 border border-neutral-800 flex items-center gap-1 cursor-pointer transition-colors"
+            title={`Reload Tab ${activeTabId} only`}
           >
             <RotateCw
-              className={`w-3 h-3 ${activeTab?.isLoading ? 'animate-spin text-sky-400' : ''}`}
+              className={`w-3 h-3 ${activeTab?.isLoading && !isReloadingAll ? 'animate-spin text-sky-400' : ''}`}
             />
-            <span className="text-[11px]">Reload</span>
+            <span className="text-[11px]">Tab {activeTabId}</span>
           </button>
         </div>
       </div>
@@ -542,8 +590,8 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
           return (
             <div
               key={tab.sessionId}
-              className={`w-full h-full absolute inset-0 bg-neutral-950 transition-opacity duration-150 ${
-                isActive ? 'opacity-100 z-10 pointer-events-auto visible' : 'opacity-0 -z-10 pointer-events-none invisible'
+              className={`w-full h-full absolute inset-0 bg-white transition-opacity duration-150 ${
+                isActive ? 'opacity-100 z-10 pointer-events-auto' : 'opacity-0 -z-10 pointer-events-none'
               }`}
             >
               {/* Tab Loading Pill Overlay */}
@@ -563,7 +611,7 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
                   src={getTabProxySrc(tab)}
                   loading="eager"
                   sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-popups"
-                  className="w-full h-full border-0 bg-neutral-950"
+                  className="w-full h-full border-0 bg-white"
                   title={`Tab ${tab.id}`}
                   onLoad={() => {
                     setTabs((prev) =>
