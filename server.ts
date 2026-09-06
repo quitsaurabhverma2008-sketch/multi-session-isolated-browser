@@ -456,6 +456,53 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
       }, 350);
       attemptFill();
     }
+
+    // Trigger Login in this page/tab on command
+    if (ev.data.type === 'TRIGGER_LOGIN_SUBMIT') {
+      function doSubmit() {
+        // 1. Direct targeted buttons (e.g. eutechsmine, common login themes)
+        const specificBtn = document.querySelector(
+          'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"]'
+        );
+        if (specificBtn && typeof specificBtn.click === 'function') {
+          specificBtn.click();
+          return true;
+        }
+
+        // 2. Find any form with password or user input
+        const forms = Array.from(document.querySelectorAll('form'));
+        const loginForm = forms.find(function(f) {
+          return f.querySelector('input[type="password"]') || f.querySelector('input[name*="user" i], input[name*="login" i]');
+        }) || forms[0];
+
+        if (loginForm) {
+          const submitBtn = loginForm.querySelector('button[type="submit"], input[type="submit"], button:not([type="button"]):not([type="reset"])');
+          if (submitBtn && typeof submitBtn.click === 'function') {
+            submitBtn.click();
+            return true;
+          }
+          if (typeof loginForm.submit === 'function') {
+            loginForm.submit();
+            return true;
+          }
+        }
+
+        // 3. Scan all buttons by text
+        const allButtons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn, [role="button"]'));
+        const textBtn = allButtons.find(function(b) {
+          const txt = (b.textContent || b.value || '').trim().toLowerCase();
+          return txt === 'login' || txt === 'log in' || txt === 'sign in' || txt === 'submit';
+        });
+        if (textBtn && typeof textBtn.click === 'function') {
+          textBtn.click();
+          return true;
+        }
+
+        return false;
+      }
+
+      doSubmit();
+    }
   });
 
   function notifyBridgeReady() {

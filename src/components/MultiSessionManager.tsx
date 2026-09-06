@@ -3,7 +3,8 @@ import {
   ArrowLeft,
   RotateCw,
   Globe,
-  ClipboardPaste
+  ClipboardPaste,
+  LogIn
 } from 'lucide-react';
 
 export interface SessionTab {
@@ -42,6 +43,7 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
   // Active selected tab number (starts at 1)
   const [activeTabId, setActiveTabId] = useState<number>(1);
   const [isReloadingAll, setIsReloadingAll] = useState<boolean>(false);
+  const [isSubmittingAll, setIsSubmittingAll] = useState<boolean>(false);
 
   // All session tabs list - initialized with 10 tabs, only Tab 1 loads startUrl initially
   const [tabs, setTabs] = useState<SessionTab[]>(() => {
@@ -159,6 +161,84 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
     setTimeout(() => {
       setBulkStatus('');
     }, 4000);
+  };
+
+  // Trigger login button across all tabs in 1 click
+  const handleTriggerAllLogin = () => {
+    setIsSubmittingAll(true);
+    setBulkStatus(`⚡ Triggering Login in all ${tabs.length} tabs...`);
+
+    tabs.forEach((tab) => {
+      if (!tab.url) return;
+      const iframe = document.getElementById(`multi-tab-frame-${tab.id}`) as HTMLIFrameElement | null;
+      if (iframe) {
+        // 1. Post message to bridge script inside iframe
+        try {
+          iframe.contentWindow?.postMessage(
+            {
+              type: 'TRIGGER_LOGIN_SUBMIT',
+              sessionId: tab.sessionId
+            },
+            '*'
+          );
+        } catch (e) {}
+
+        // 2. Direct DOM execution (same-origin iframe fallback)
+        try {
+          const doc = iframe.contentDocument || iframe.contentWindow?.document;
+          if (doc) {
+            const specificBtn = doc.querySelector(
+              'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"]'
+            ) as HTMLElement | null;
+
+            if (specificBtn && typeof specificBtn.click === 'function') {
+              specificBtn.click();
+            } else {
+              const forms = Array.from(doc.querySelectorAll('form'));
+              const loginForm = forms.find(
+                (f) =>
+                  f.querySelector('input[type="password"]') ||
+                  f.querySelector('input[name*="user" i], input[name*="login" i]')
+              ) || forms[0];
+
+              if (loginForm) {
+                const subBtn = loginForm.querySelector(
+                  'button[type="submit"], input[type="submit"], button:not([type="button"]):not([type="reset"])'
+                ) as HTMLElement | null;
+
+                if (subBtn && typeof subBtn.click === 'function') {
+                  subBtn.click();
+                } else if (typeof loginForm.submit === 'function') {
+                  loginForm.submit();
+                }
+              } else {
+                const allButtons = Array.from(
+                  doc.querySelectorAll('button, input[type="submit"], a.btn, [role="button"]')
+                );
+                const textBtn = allButtons.find((b) => {
+                  const txt = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
+                  return txt === 'login' || txt === 'log in' || txt === 'sign in' || txt === 'submit';
+                }) as HTMLElement | null;
+
+                if (textBtn && typeof textBtn.click === 'function') {
+                  textBtn.click();
+                }
+              }
+            }
+          }
+        } catch (e) {}
+      }
+    });
+
+    setTimeout(() => {
+      setIsSubmittingAll(false);
+    }, 1500);
+    setTimeout(() => {
+      setBulkStatus('✓ Login triggered in all tabs');
+    }, 1000);
+    setTimeout(() => {
+      setBulkStatus('');
+    }, 4500);
   };
 
   // Reload the active tab safely without re-rendering all other tabs
@@ -548,8 +628,23 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
         </div>
       </div>
 
-      {/* 3. TAB NUMBERS ROW: 1 2 3 4 5 6 ... DIRECTLY UNDER PASTE OPTION */}
-      <div className="h-10 bg-black border-b border-neutral-900 px-3 flex items-center gap-1.5 overflow-x-auto scrollbar-thin shrink-0 z-20">
+      {/* 3. TAB NUMBERS & ACTION ROW: LOGIN BUTTON DIRECTLY UNDER PASTE OPTION */}
+      <div className="h-10 bg-black border-b border-neutral-900 px-3 flex items-center gap-2 overflow-x-auto scrollbar-thin shrink-0 z-20">
+        {/* Login Button directly under Paste button: 1 tap triggers login in all tabs */}
+        <button
+          id="btn-login-all-tabs"
+          type="button"
+          onClick={handleTriggerAllLogin}
+          disabled={isSubmittingAll}
+          className="h-7 px-3 rounded bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-black font-mono text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer shadow-md transition-all active:scale-95 disabled:opacity-50"
+          title="1 tap me sabhi tabs me Login button trigger karein (Trigger Login in All Tabs)"
+        >
+          <LogIn className={`w-3.5 h-3.5 ${isSubmittingAll ? 'animate-bounce' : ''}`} />
+          <span>{isSubmittingAll ? 'Logging in...' : 'Login All'}</span>
+        </button>
+
+        <div className="h-4 w-px bg-neutral-800 shrink-0" />
+
         {tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
           const isFilled = autofilledTabs.includes(tab.id);
