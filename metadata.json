@@ -1,0 +1,6 @@
+{
+  "name": "Isolated Browser & Real-time DOM Inspector",
+  "description": "An isolated in-browser environment featuring interactive website sessions alongside live real-time HTML source inspection and DOM change tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
