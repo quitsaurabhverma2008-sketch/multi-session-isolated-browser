@@ -168,7 +168,7 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
   // Trigger login button across all tabs in 1 click
   const handleTriggerAllLogin = () => {
     setIsSubmittingAll(true);
-    setBulkStatus(`⚡ Triggering Login in all ${tabs.length} tabs...`);
+    setBulkStatus(`⚡ Logging into all ${tabs.length} tabs...`);
 
     const triggerTabLogin = (tab: SessionTab) => {
       if (!tab.url) return;
@@ -177,7 +177,7 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
 
       const creds = pendingAutofillsRef.current.get(tab.id);
 
-      // 1. Post message to bridge script inside iframe
+      // 1. Post message to isolated bridge script inside iframe
       try {
         iframe.contentWindow?.postMessage(
           {
@@ -190,10 +190,23 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
         );
       } catch (e) {}
 
-      // 2. Direct DOM execution (same-origin fallback)
+      // 2. Direct DOM assistance (same-origin fallback)
       try {
         const doc = iframe.contentDocument || iframe.contentWindow?.document;
         if (doc) {
+          // Re-enable all buttons in the tab so manual taps and automatic submit are never locked
+          const allButtons = Array.from(doc.querySelectorAll('button, input[type="submit"], [role="button"]'));
+          allButtons.forEach((b: any) => {
+            if (b.disabled) {
+              b.disabled = false;
+              b.removeAttribute('disabled');
+              b.classList.remove('disabled');
+            }
+            if (b.style.pointerEvents === 'none') {
+              b.style.pointerEvents = 'auto';
+            }
+          });
+
           const forms = Array.from(doc.querySelectorAll('form'));
           const loginForm = forms.find(
             (f) =>
@@ -223,7 +236,11 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
           }
 
           if (loginForm) {
-            // Trigger input & change events on inputs
+            // Avoid duplicate submission if already in progress
+            if ((loginForm as any).__submitting__) return;
+            (loginForm as any).__submitting__ = true;
+
+            // Trigger input & change events on inputs so validations pass
             const inputs = Array.from(loginForm.querySelectorAll('input:not([type="hidden"])'));
             inputs.forEach((inp) => {
               try {
@@ -237,6 +254,12 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
               'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], input[type="submit"][value*="login" i], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"], button[type="submit"], input[type="submit"]'
             ) as HTMLElement | null || doc.querySelector('button.login_button_detail, button[name="login"]') as HTMLElement | null;
 
+            if (specificBtn) {
+              (specificBtn as any).disabled = false;
+              specificBtn.removeAttribute('disabled');
+              specificBtn.classList.remove('disabled');
+            }
+
             // Ensure name="login" is sent in POST payload
             const btnName = (specificBtn && specificBtn.getAttribute('name')) || 'login';
             if (btnName && !loginForm.querySelector(`input[type="hidden"][name="${btnName}"]`)) {
@@ -249,12 +272,21 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
               } catch (e) {}
             }
 
-            // Route form action to proxy
-            const rawAction = loginForm.getAttribute('action') || '';
-            const targetAction = rawAction
-              ? new URL(rawAction, doc.baseURI || tab.url).href
-              : (doc.baseURI || tab.url);
-            const proxiedAction = `/api/proxy?url=${encodeURIComponent(targetAction)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
+            // Route form action to proxy with ABSOLUTE URL (prevent <base href> 404s!)
+            let rawAction = loginForm.getAttribute('action') || '';
+            let targetAction = tab.url;
+            if (rawAction && rawAction.includes('/api/proxy')) {
+              try {
+                const parsed = new URL(rawAction, window.location.origin);
+                targetAction = parsed.searchParams.get('url') || tab.url;
+              } catch (e) {
+                targetAction = tab.url;
+              }
+            } else if (rawAction) {
+              targetAction = new URL(rawAction, doc.baseURI || tab.url).href;
+            }
+
+            const proxiedAction = `${window.location.origin}/api/proxy?url=${encodeURIComponent(targetAction)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
             try {
               HTMLFormElement.prototype.setAttribute.call(loginForm, 'action', proxiedAction);
               HTMLFormElement.prototype.setAttribute.call(loginForm, 'target', '_self');
@@ -262,22 +294,22 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
               loginForm.setAttribute('action', proxiedAction);
             }
 
-            // Submit form
+            // Submit form ONCE cleanly using standard requestSubmit
             let submitted = false;
-            if (specificBtn) {
+            if (typeof (loginForm as any).requestSubmit === 'function' && specificBtn) {
+              try {
+                (loginForm as any).requestSubmit(specificBtn);
+                submitted = true;
+              } catch (e) {}
+            }
+
+            if (!submitted && specificBtn) {
               try {
                 const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView || window });
                 specificBtn.dispatchEvent(clickEv);
                 if (typeof specificBtn.click === 'function') {
                   specificBtn.click();
                 }
-                submitted = true;
-              } catch (e) {}
-            }
-
-            if (typeof (loginForm as any).requestSubmit === 'function' && specificBtn) {
-              try {
-                (loginForm as any).requestSubmit(specificBtn);
                 submitted = true;
               } catch (e) {}
             }
@@ -289,49 +321,37 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
                 try { loginForm.submit(); } catch (e2) {}
               }
             }
-          } else {
-            const standaloneBtn = doc.querySelector(
-              'button.login_button_detail, button.log_in_button, button[name="login"], button#login, input[name="login"][type="submit"]'
-            ) as HTMLElement | null;
-            if (standaloneBtn && typeof standaloneBtn.click === 'function') {
-              standaloneBtn.click();
-            }
+
+            // Re-enable button after 3s so user can always tap manually
+            setTimeout(() => {
+              (loginForm as any).__submitting__ = false;
+              if (specificBtn) {
+                (specificBtn as any).disabled = false;
+                specificBtn.removeAttribute('disabled');
+                specificBtn.classList.remove('disabled');
+              }
+            }, 3000);
           }
         }
       } catch (e) {}
     };
 
-    // Stagger submission across tabs in 3 progressive waves
+    // Stagger submission across tabs cleanly (70ms spacing for smooth 30-40 tab execution)
     tabs.forEach((tab, index) => {
       setTimeout(() => {
         triggerTabLogin(tab);
-      }, index * 30);
+      }, index * 70);
     });
 
-    setTimeout(() => {
-      tabs.forEach((tab, index) => {
-        setTimeout(() => {
-          triggerTabLogin(tab);
-        }, index * 30);
-      });
-    }, 700);
-
-    setTimeout(() => {
-      tabs.forEach((tab, index) => {
-        setTimeout(() => {
-          triggerTabLogin(tab);
-        }, index * 25);
-      });
-    }, 1600);
-
+    const totalDuration = tabs.length * 70 + 800;
     setTimeout(() => {
       setIsSubmittingAll(false);
-      setBulkStatus('✓ Login triggered across all tabs');
-    }, Math.max(2000, tabs.length * 60 + 500));
+      setBulkStatus(`✓ Login sent to all ${tabs.length} tabs`);
+    }, Math.max(1500, totalDuration));
 
     setTimeout(() => {
       setBulkStatus('');
-    }, 5500);
+    }, totalDuration + 4000);
   };
 
   // Trigger "START FREE MINING" button across all tabs in 1 click
@@ -414,7 +434,17 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
             const rawHref = specificBtn.getAttribute('href');
             if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
               try {
-                const targetResolved = new URL(rawHref, doc.baseURI || tab.url).href;
+                let targetResolved = tab.url;
+                if (rawHref.includes('/api/proxy')) {
+                  try {
+                    const p = new URL(rawHref, window.location.origin);
+                    targetResolved = p.searchParams.get('url') || tab.url;
+                  } catch (e) {
+                    targetResolved = tab.url;
+                  }
+                } else {
+                  targetResolved = new URL(rawHref, doc.baseURI || tab.url).href;
+                }
                 const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetResolved)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
                 setTimeout(() => {
                   try {

@@ -182,6 +182,29 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
   function resolveTargetUrl(rawHref) {
     if (!rawHref) return currentTargetUrl;
     try {
+      // If rawHref is already a proxy URL (relative or absolute), extract the true target URL!
+      if (typeof rawHref === 'string' && rawHref.includes('/api/proxy')) {
+        try {
+          const parsedProxy = new URL(rawHref, window.location.origin);
+          const embeddedUrl = parsedProxy.searchParams.get('url');
+          if (embeddedUrl) {
+            return embeddedUrl;
+          }
+        } catch (e) {}
+
+        const queryIdx = rawHref.indexOf('url=');
+        if (queryIdx !== -1) {
+          const rest = rawHref.substring(queryIdx + 4);
+          const andIdx = rest.indexOf('&');
+          const encoded = andIdx !== -1 ? rest.substring(0, andIdx) : rest;
+          try {
+            return decodeURIComponent(encoded);
+          } catch (e) {
+            return encoded;
+          }
+        }
+      }
+
       let resolved = new URL(rawHref, currentTargetUrl).href;
       if (resolved.startsWith(PROXY_ORIGIN) && !resolved.includes('/api/proxy')) {
         const targetObj = new URL(currentTargetUrl);
@@ -478,6 +501,12 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
         }) || forms[0];
 
         if (loginForm) {
+          // If this form is currently in-flight submitting, do not abort with duplicate submit
+          if (loginForm.__is_submitting_now__) {
+            return true;
+          }
+          loginForm.__is_submitting_now__ = true;
+
           // Trigger input and change events on all form inputs so page validator accepts them
           const formInputs = Array.from(loginForm.querySelectorAll('input:not([type="hidden"])'));
           formInputs.forEach(function(inp) {
@@ -492,7 +521,14 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
             'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], input[type="submit"][value*="login" i], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"], button[type="submit"], input[type="submit"]'
           ) || document.querySelector('button.login_button_detail, button[name="login"]');
 
-          // CRITICAL FIX: Ensure button name (like name="login") is sent in POST body even with programmatic submit
+          // Ensure button is enabled (never permanently locked)
+          if (specificBtn) {
+            specificBtn.disabled = false;
+            specificBtn.removeAttribute('disabled');
+            specificBtn.classList.remove('disabled');
+          }
+
+          // Ensure button name (like name="login") is sent in POST body even with programmatic submit
           const btnName = (specificBtn && specificBtn.getAttribute('name')) || 'login';
           if (btnName && !loginForm.querySelector('input[type="hidden"][name="' + btnName + '"]')) {
             try {
@@ -504,7 +540,7 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
             } catch (e) {}
           }
 
-          // 3. Ensure form action routes safely to proxy
+          // 3. Ensure form action routes safely to proxy (absolute URL to prevent <base href> 404s)
           const rawAction = loginForm.getAttribute('action') || '';
           const targetAction = resolveTargetUrl(rawAction);
           const proxiedAction = getProxiedUrl(targetAction);
@@ -515,22 +551,22 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
             loginForm.setAttribute('action', proxiedAction);
           }
 
-          // 4. Fire click on submit button AND submit form
+          // 4. Submit form cleanly ONCE (W3C standard requestSubmit preserves button credentials)
           let submitted = false;
-          if (specificBtn) {
+          if (typeof loginForm.requestSubmit === 'function' && specificBtn) {
+            try {
+              loginForm.requestSubmit(specificBtn);
+              submitted = true;
+            } catch (e) {}
+          }
+
+          if (!submitted && specificBtn) {
             try {
               const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
               specificBtn.dispatchEvent(clickEv);
               if (typeof specificBtn.click === 'function') {
                 specificBtn.click();
               }
-              submitted = true;
-            } catch (e) {}
-          }
-
-          if (typeof loginForm.requestSubmit === 'function' && specificBtn) {
-            try {
-              loginForm.requestSubmit(specificBtn);
               submitted = true;
             } catch (e) {}
           }
@@ -543,6 +579,16 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
             }
           }
 
+          // After 2.5 seconds, reset submitting lock and ensure button is enabled for user manual taps
+          setTimeout(function() {
+            loginForm.__is_submitting_now__ = false;
+            if (specificBtn) {
+              specificBtn.disabled = false;
+              specificBtn.removeAttribute('disabled');
+              specificBtn.classList.remove('disabled');
+            }
+          }, 2500);
+
           return true;
         }
 
@@ -550,19 +596,26 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
         const standaloneBtn = document.querySelector(
           'button.login_button_detail, button.log_in_button, button[name="login"], button#login, input[name="login"][type="submit"]'
         );
-        if (standaloneBtn && typeof standaloneBtn.click === 'function') {
-          standaloneBtn.click();
-          return true;
+        if (standaloneBtn) {
+          standaloneBtn.disabled = false;
+          standaloneBtn.removeAttribute('disabled');
+          if (typeof standaloneBtn.click === 'function') {
+            standaloneBtn.click();
+            return true;
+          }
         }
 
         return false;
       }
 
       doSubmit();
-      // Multi-wave retry for slow background tabs
-      setTimeout(doSubmit, 350);
-      setTimeout(doSubmit, 900);
-      setTimeout(doSubmit, 1600);
+      // Only gentle fallback after 1.5s if inputs still exist (page didn't navigate)
+      setTimeout(function() {
+        const inputs = findLoginInputs();
+        if (inputs.user || inputs.pass) {
+          doSubmit();
+        }
+      }, 1500);
     }
 
     // Trigger START FREE MINING in this page/tab on command
@@ -724,9 +777,52 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
       } catch (e) {
         form.setAttribute('action', proxiedAction);
       }
+
+      // Ensure button name (like name="login") is sent in POST body
+      try {
+        const btn = form.querySelector('button[name], input[type="submit"][name]');
+        if (btn) {
+          const bName = btn.getAttribute('name');
+          const bVal = btn.getAttribute('value') || '1';
+          if (bName && !form.querySelector('input[type="hidden"][name="' + bName + '"]')) {
+            const hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = bName;
+            hidden.value = bVal;
+            form.appendChild(hidden);
+          }
+        }
+      } catch (e) {}
+
       return true;
     }
   }
+
+  // Ensure submit/login buttons are NEVER locked or disabled from user clicks
+  function ensureButtonsInteractive() {
+    try {
+      const candidates = document.querySelectorAll(
+        'button, input[type="submit"], [role="button"], a.btn-start-mining, a.free-btn'
+      );
+      candidates.forEach(function(el) {
+        if (el.disabled) {
+          el.disabled = false;
+          el.removeAttribute('disabled');
+        }
+        if (el.classList.contains('disabled')) {
+          el.classList.remove('disabled');
+        }
+        if (el.style.pointerEvents === 'none') {
+          el.style.pointerEvents = 'auto';
+        }
+      });
+    } catch (e) {}
+  }
+
+  // Continuously ensure interactive on hover/touch
+  document.addEventListener('pointerdown', ensureButtonsInteractive, true);
+  document.addEventListener('mouseover', ensureButtonsInteractive, true);
+  document.addEventListener('touchstart', ensureButtonsInteractive, true);
 
   // Intercept HTML forms (Multi-step wizards, logins, checkout)
   document.addEventListener('submit', function(e) {
@@ -863,12 +959,29 @@ async function handleProxyRequest(
   targetUrl: string,
   sessionId: string
 ) {
+  // Unwrap any accidental nested proxy URLs (e.g. https://target.com/api/proxy?url=...)
+  let cleanTarget = targetUrl;
+  while (cleanTarget && cleanTarget.includes('/api/proxy')) {
+    try {
+      const dummyBase = cleanTarget.startsWith('http') ? undefined : 'http://localhost';
+      const parsed = new URL(cleanTarget, dummyBase);
+      const inner = parsed.searchParams.get('url');
+      if (inner && inner !== cleanTarget) {
+        cleanTarget = inner;
+      } else {
+        break;
+      }
+    } catch (e) {
+      break;
+    }
+  }
+
   let urlObj: URL;
   try {
     const normalizedUrl =
-      targetUrl.startsWith("http://") || targetUrl.startsWith("https://")
-        ? targetUrl
-        : `https://${targetUrl}`;
+      cleanTarget.startsWith("http://") || cleanTarget.startsWith("https://")
+        ? cleanTarget
+        : `https://${cleanTarget}`;
     urlObj = new URL(normalizedUrl);
   } catch (e) {
     return res.status(400).send(`
