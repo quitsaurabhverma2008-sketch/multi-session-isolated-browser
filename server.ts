@@ -460,41 +460,83 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
     // Trigger Login in this page/tab on command
     if (ev.data.type === 'TRIGGER_LOGIN_SUBMIT') {
       function doSubmit() {
-        // 1. Direct targeted buttons (e.g. eutechsmine, common login themes)
-        const specificBtn = document.querySelector(
-          'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"]'
-        );
-        if (specificBtn && typeof specificBtn.click === 'function') {
-          specificBtn.click();
-          return true;
-        }
-
-        // 2. Find any form with password or user input
+        // 1. Find form with password or user inputs
         const forms = Array.from(document.querySelectorAll('form'));
         const loginForm = forms.find(function(f) {
-          return f.querySelector('input[type="password"]') || f.querySelector('input[name*="user" i], input[name*="login" i]');
+          return f.querySelector('input[type="password"]') || f.querySelector('input[name*="user" i], input[name*="login" i], #user');
         }) || forms[0];
 
         if (loginForm) {
-          const submitBtn = loginForm.querySelector('button[type="submit"], input[type="submit"], button:not([type="button"]):not([type="reset"])');
-          if (submitBtn && typeof submitBtn.click === 'function') {
-            submitBtn.click();
-            return true;
+          // Trigger input and change events on all form inputs so page validator accepts them
+          const formInputs = Array.from(loginForm.querySelectorAll('input:not([type="hidden"])'));
+          formInputs.forEach(function(inp) {
+            try {
+              inp.dispatchEvent(new Event('input', { bubbles: true }));
+              inp.dispatchEvent(new Event('change', { bubbles: true }));
+            } catch (e) {}
+          });
+
+          // 2. Identify the specific submit button (e.g. <button type="submit" name="login" class="login_button_detail">Login</button>)
+          const specificBtn = loginForm.querySelector(
+            'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], button.btn-login, button[type="submit"], input[type="submit"]'
+          ) || document.querySelector('button.login_button_detail, button[name="login"]');
+
+          // CRITICAL FIX: Ensure button name (like name="login") is sent in POST body even with programmatic submit
+          const btnName = (specificBtn && specificBtn.getAttribute('name')) || 'login';
+          if (btnName && !loginForm.querySelector('input[type="hidden"][name="' + btnName + '"]')) {
+            try {
+              const hidden = document.createElement('input');
+              hidden.type = 'hidden';
+              hidden.name = btnName;
+              hidden.value = (specificBtn && specificBtn.getAttribute('value')) || '1';
+              loginForm.appendChild(hidden);
+            } catch (e) {}
           }
-          if (typeof loginForm.submit === 'function') {
-            loginForm.submit();
-            return true;
+
+          // 3. Ensure form action routes safely to proxy
+          const rawAction = loginForm.getAttribute('action') || '';
+          const targetAction = resolveTargetUrl(rawAction);
+          const proxiedAction = getProxiedUrl(targetAction);
+          try {
+            HTMLFormElement.prototype.setAttribute.call(loginForm, 'action', proxiedAction);
+            HTMLFormElement.prototype.setAttribute.call(loginForm, 'target', '_self');
+          } catch (e) {
+            loginForm.setAttribute('action', proxiedAction);
           }
+
+          // 4. Fire click on submit button AND submit form
+          let submitted = false;
+          if (specificBtn && typeof specificBtn.click === 'function') {
+            try {
+              specificBtn.click();
+              submitted = true;
+            } catch (e) {}
+          }
+
+          if (typeof loginForm.requestSubmit === 'function' && specificBtn) {
+            try {
+              loginForm.requestSubmit(specificBtn);
+              submitted = true;
+            } catch (e) {}
+          }
+
+          if (!submitted) {
+            try {
+              HTMLFormElement.prototype.submit.call(loginForm);
+            } catch (e) {
+              try { loginForm.submit(); } catch (e2) {}
+            }
+          }
+
+          return true;
         }
 
-        // 3. Scan all buttons by text
-        const allButtons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn, [role="button"]'));
-        const textBtn = allButtons.find(function(b) {
-          const txt = (b.textContent || b.value || '').trim().toLowerCase();
-          return txt === 'login' || txt === 'log in' || txt === 'sign in' || txt === 'submit';
-        });
-        if (textBtn && typeof textBtn.click === 'function') {
-          textBtn.click();
+        // Fallback: standalone button
+        const standaloneBtn = document.querySelector(
+          'button.login_button_detail, button.log_in_button, button[name="login"], button#login, input[name="login"][type="submit"]'
+        );
+        if (standaloneBtn && typeof standaloneBtn.click === 'function') {
+          standaloneBtn.click();
           return true;
         }
 
@@ -502,53 +544,75 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
       }
 
       doSubmit();
+      // Retry once after 350ms to ensure background tabs that were settling process the submit
+      setTimeout(doSubmit, 350);
     }
 
     // Trigger START FREE MINING in this page/tab on command
     if (ev.data.type === 'TRIGGER_START_MINING') {
       function doMine() {
-        // 1. Specific selector for START FREE MINING button
-        const specificMineBtn = document.querySelector(
-          'a.free-btn, a.btn-start-mining, a[href*="order_ids="], a[href*="free_mining"], button.free-btn, #startMiningBtn, .mining_btn a'
-        );
-
-        if (specificMineBtn) {
-          try {
-            specificMineBtn.click();
-            const rawHref = specificMineBtn.getAttribute('href');
-            if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
-              const targetResolved = resolveTargetUrl(rawHref);
-              notifyNavigating(targetResolved);
-              window.location.href = getProxiedUrl(targetResolved);
-            }
-            return true;
-          } catch (e) {}
+        function isExcluded(el) {
+          if (!el) return true;
+          // STRICT RULE: Never click links inside sidebar navigation, menus, or income reports!
+          if (el.closest('.sidebar-wrapper, .metismenu, nav, .side-mobile-menu, header, footer, .main-menu')) return true;
+          const href = (el.getAttribute('href') || '').toLowerCase();
+          if (href.includes('income/details') || href.includes('source=') || href.includes('logout') || href.includes('register')) return true;
+          return false;
         }
 
-        // 2. Search all links and buttons by text content
-        const allCandidates = Array.from(document.querySelectorAll('a, button, [role="button"], input[type="button"], input[type="submit"]'));
-        const textBtn = allCandidates.find(function(el) {
-          const txt = (el.textContent || el.value || '').trim().toLowerCase();
-          return txt.includes('start free mining') || txt.includes('free mining') || txt.includes('start mining');
-        });
+        let mineBtn = null;
 
-        if (textBtn) {
+        // 1. Direct match inside .mining_btn container (where START FREE MINING resides)
+        const container = document.querySelector('.mining_btn');
+        if (container) {
+          mineBtn = container.querySelector('a.free-btn, a.btn-start-mining, a[href*="order_ids="], a');
+        }
+
+        // 2. Live dot container inside free mining button
+        if (!mineBtn || isExcluded(mineBtn)) {
+          const liveDot = document.querySelector('#liveDot, .live-dot');
+          if (liveDot) {
+            mineBtn = liveDot.closest('a, button');
+          }
+        }
+
+        // 3. Specific class on mining button
+        if (!mineBtn || isExcluded(mineBtn)) {
+          const candidates = Array.from(document.querySelectorAll('a.btn-start-mining.free-btn, a.free-btn, a[href*="order_ids="], a.btn-start-mining'));
+          mineBtn = candidates.find(el => !isExcluded(el));
+        }
+
+        // 4. Search by visible text (Must strictly contain "START FREE MINING" or "START MINING", NEVER sidebar)
+        if (!mineBtn || isExcluded(mineBtn)) {
+          const allButtons = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+          mineBtn = allButtons.find(function(el) {
+            if (isExcluded(el)) return false;
+            const txt = (el.innerText || el.textContent || '').trim().toUpperCase();
+            return txt.includes('START FREE MINING') || txt === 'START MINING';
+          });
+        }
+
+        if (mineBtn && !isExcluded(mineBtn)) {
           try {
-            textBtn.click();
-            const rawHref = textBtn.getAttribute('href');
-            if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
+            mineBtn.click();
+          } catch (e) {}
+
+          const rawHref = mineBtn.getAttribute('href');
+          if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
+            try {
               const targetResolved = resolveTargetUrl(rawHref);
               notifyNavigating(targetResolved);
               window.location.href = getProxiedUrl(targetResolved);
-            }
-            return true;
-          } catch (e) {}
+            } catch (e) {}
+          }
+          return true;
         }
 
         return false;
       }
 
       doMine();
+      setTimeout(doMine, 350);
     }
   });
 

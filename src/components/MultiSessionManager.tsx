@@ -170,156 +170,244 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
     setIsSubmittingAll(true);
     setBulkStatus(`⚡ Triggering Login in all ${tabs.length} tabs...`);
 
-    tabs.forEach((tab) => {
+    const triggerTabLogin = (tab: SessionTab) => {
       if (!tab.url) return;
       const iframe = document.getElementById(`multi-tab-frame-${tab.id}`) as HTMLIFrameElement | null;
-      if (iframe) {
-        // 1. Post message to bridge script inside iframe
-        try {
-          iframe.contentWindow?.postMessage(
-            {
-              type: 'TRIGGER_LOGIN_SUBMIT',
-              sessionId: tab.sessionId
-            },
-            '*'
-          );
-        } catch (e) {}
+      if (!iframe) return;
 
-        // 2. Direct DOM execution (same-origin iframe fallback)
-        try {
-          const doc = iframe.contentDocument || iframe.contentWindow?.document;
-          if (doc) {
-            const specificBtn = doc.querySelector(
-              'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"]'
-            ) as HTMLElement | null;
+      // 1. Post message to bridge script inside iframe
+      try {
+        iframe.contentWindow?.postMessage(
+          {
+            type: 'TRIGGER_LOGIN_SUBMIT',
+            sessionId: tab.sessionId
+          },
+          '*'
+        );
+      } catch (e) {}
 
+      // 2. Direct DOM execution (same-origin fallback)
+      try {
+        const doc = iframe.contentDocument || iframe.contentWindow?.document;
+        if (doc) {
+          const forms = Array.from(doc.querySelectorAll('form'));
+          const loginForm = forms.find(
+            (f) =>
+              f.querySelector('input[type="password"]') ||
+              f.querySelector('input[name*="user" i], input[name*="login" i], #user')
+          ) || forms[0];
+
+          if (loginForm) {
+            // Trigger input & change events on inputs
+            const inputs = Array.from(loginForm.querySelectorAll('input:not([type="hidden"])'));
+            inputs.forEach((inp) => {
+              try {
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+              } catch (e) {}
+            });
+
+            // Find submit button
+            const specificBtn = loginForm.querySelector(
+              'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], button.btn-login, button[type="submit"], input[type="submit"]'
+            ) as HTMLElement | null || doc.querySelector('button.login_button_detail, button[name="login"]') as HTMLElement | null;
+
+            // Ensure name="login" is sent in POST payload
+            const btnName = (specificBtn && specificBtn.getAttribute('name')) || 'login';
+            if (btnName && !loginForm.querySelector(`input[type="hidden"][name="${btnName}"]`)) {
+              try {
+                const hidden = doc.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = btnName;
+                hidden.value = (specificBtn && specificBtn.getAttribute('value')) || '1';
+                loginForm.appendChild(hidden);
+              } catch (e) {}
+            }
+
+            // Route form action to proxy
+            const rawAction = loginForm.getAttribute('action') || '';
+            const targetAction = rawAction
+              ? new URL(rawAction, doc.baseURI || tab.url).href
+              : (doc.baseURI || tab.url);
+            const proxiedAction = `/api/proxy?url=${encodeURIComponent(targetAction)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
+            try {
+              HTMLFormElement.prototype.setAttribute.call(loginForm, 'action', proxiedAction);
+              HTMLFormElement.prototype.setAttribute.call(loginForm, 'target', '_self');
+            } catch (e) {
+              loginForm.setAttribute('action', proxiedAction);
+            }
+
+            // Submit form
+            let submitted = false;
             if (specificBtn && typeof specificBtn.click === 'function') {
-              specificBtn.click();
-            } else {
-              const forms = Array.from(doc.querySelectorAll('form'));
-              const loginForm = forms.find(
-                (f) =>
-                  f.querySelector('input[type="password"]') ||
-                  f.querySelector('input[name*="user" i], input[name*="login" i]')
-              ) || forms[0];
+              try {
+                specificBtn.click();
+                submitted = true;
+              } catch (e) {}
+            }
 
-              if (loginForm) {
-                const subBtn = loginForm.querySelector(
-                  'button[type="submit"], input[type="submit"], button:not([type="button"]):not([type="reset"])'
-                ) as HTMLElement | null;
+            if (typeof (loginForm as any).requestSubmit === 'function' && specificBtn) {
+              try {
+                (loginForm as any).requestSubmit(specificBtn);
+                submitted = true;
+              } catch (e) {}
+            }
 
-                if (subBtn && typeof subBtn.click === 'function') {
-                  subBtn.click();
-                } else if (typeof loginForm.submit === 'function') {
-                  loginForm.submit();
-                }
-              } else {
-                const allButtons = Array.from(
-                  doc.querySelectorAll('button, input[type="submit"], a.btn, [role="button"]')
-                );
-                const textBtn = allButtons.find((b) => {
-                  const txt = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
-                  return txt === 'login' || txt === 'log in' || txt === 'sign in' || txt === 'submit';
-                }) as HTMLElement | null;
-
-                if (textBtn && typeof textBtn.click === 'function') {
-                  textBtn.click();
-                }
+            if (!submitted) {
+              try {
+                HTMLFormElement.prototype.submit.call(loginForm);
+              } catch (e) {
+                try { loginForm.submit(); } catch (e2) {}
               }
             }
+          } else {
+            const standaloneBtn = doc.querySelector(
+              'button.login_button_detail, button.log_in_button, button[name="login"], button#login, input[name="login"][type="submit"]'
+            ) as HTMLElement | null;
+            if (standaloneBtn && typeof standaloneBtn.click === 'function') {
+              standaloneBtn.click();
+            }
           }
-        } catch (e) {}
-      }
+        }
+      } catch (e) {}
+    };
+
+    // Stagger submission across tabs by 50ms to prevent browser network stall with 20 tabs
+    tabs.forEach((tab, index) => {
+      setTimeout(() => {
+        triggerTabLogin(tab);
+      }, index * 50);
     });
+
+    // Gentle follow-up retry after 1.5s for any background tab that was delayed
+    setTimeout(() => {
+      tabs.forEach((tab, index) => {
+        setTimeout(() => {
+          triggerTabLogin(tab);
+        }, index * 40);
+      });
+    }, 1400);
 
     setTimeout(() => {
       setIsSubmittingAll(false);
-    }, 1500);
-    setTimeout(() => {
-      setBulkStatus('✓ Login triggered in all tabs');
-    }, 1000);
+      setBulkStatus('✓ Login triggered across all tabs');
+    }, Math.max(2000, tabs.length * 60 + 500));
+
     setTimeout(() => {
       setBulkStatus('');
-    }, 4500);
+    }, 5500);
   };
 
   // Trigger "START FREE MINING" button across all tabs in 1 click
   const handleTriggerAllMining = () => {
     setIsMiningAll(true);
-    setBulkStatus(`⛏️ Triggering Start Mining in all ${tabs.length} tabs...`);
+    setBulkStatus(`⛏️ Triggering Start Free Mining in all ${tabs.length} tabs...`);
 
-    tabs.forEach((tab) => {
+    const triggerTabMining = (tab: SessionTab) => {
       if (!tab.url) return;
       const iframe = document.getElementById(`multi-tab-frame-${tab.id}`) as HTMLIFrameElement | null;
-      if (iframe) {
-        // 1. Post message to bridge script inside iframe
-        try {
-          iframe.contentWindow?.postMessage(
-            {
-              type: 'TRIGGER_START_MINING',
-              sessionId: tab.sessionId
-            },
-            '*'
-          );
-        } catch (e) {}
+      if (!iframe) return;
 
-        // 2. Direct DOM execution (same-origin iframe fallback)
-        try {
-          const doc = iframe.contentDocument || iframe.contentWindow?.document;
-          if (doc) {
-            const specificBtn = doc.querySelector(
-              'a.free-btn, a.btn-start-mining, a[href*="order_ids="], a[href*="free_mining"], button.free-btn, #startMiningBtn, .mining_btn a'
-            ) as HTMLElement | null;
+      // 1. Post message to bridge script inside iframe
+      try {
+        iframe.contentWindow?.postMessage(
+          {
+            type: 'TRIGGER_START_MINING',
+            sessionId: tab.sessionId
+          },
+          '*'
+        );
+      } catch (e) {}
 
-            if (specificBtn) {
-              specificBtn.click();
-              const rawHref = specificBtn.getAttribute('href');
-              if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
-                try {
-                  const targetResolved = new URL(rawHref, doc.baseURI || tab.url).href;
-                  const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetResolved)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
-                  iframe.src = proxyUrl;
-                } catch (e) {}
-              }
-            } else {
-              const allCandidates = Array.from(
-                doc.querySelectorAll('a, button, [role="button"], input[type="button"]')
-              );
-              const textBtn = allCandidates.find((el) => {
-                const txt = (el.textContent || (el as HTMLInputElement).value || '').trim().toLowerCase();
-                return (
-                  txt.includes('start free mining') ||
-                  txt.includes('free mining') ||
-                  txt.includes('start mining')
-                );
-              }) as HTMLElement | null;
+      // 2. Direct DOM execution (same-origin fallback)
+      try {
+        const doc = iframe.contentDocument || iframe.contentWindow?.document;
+        if (doc) {
+          const isExcluded = (el: Element | null): boolean => {
+            if (!el) return true;
+            // STRICT: Never match links in sidebar navigation, menus, or income reports
+            if (el.closest('.sidebar-wrapper, .metismenu, nav, .side-mobile-menu, header, footer, .main-menu')) return true;
+            const href = (el.getAttribute('href') || '').toLowerCase();
+            if (href.includes('income/details') || href.includes('source=') || href.includes('logout') || href.includes('register')) return true;
+            return false;
+          };
 
-              if (textBtn) {
-                textBtn.click();
-                const rawHref = textBtn.getAttribute('href');
-                if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
-                  try {
-                    const targetResolved = new URL(rawHref, doc.baseURI || tab.url).href;
-                    const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetResolved)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
-                    iframe.src = proxyUrl;
-                  } catch (e) {}
-                }
-              }
+          let specificBtn: HTMLElement | null = null;
+
+          // Check inside .mining_btn container first
+          const container = doc.querySelector('.mining_btn');
+          if (container) {
+            specificBtn = container.querySelector('a.free-btn, a.btn-start-mining, a[href*="order_ids="], a') as HTMLElement | null;
+          }
+
+          // Live dot container inside free mining button
+          if (!specificBtn || isExcluded(specificBtn)) {
+            const liveDot = doc.querySelector('#liveDot, .live-dot');
+            if (liveDot) {
+              specificBtn = liveDot.closest('a, button') as HTMLElement | null;
             }
           }
-        } catch (e) {}
-      }
+
+          // Direct specific classes
+          if (!specificBtn || isExcluded(specificBtn)) {
+            const candidates = Array.from(
+              doc.querySelectorAll('a.btn-start-mining.free-btn, a.free-btn, a[href*="order_ids="], a.btn-start-mining')
+            );
+            specificBtn = (candidates.find((el) => !isExcluded(el)) as HTMLElement | null) || null;
+          }
+
+          // Scan by text (Must strictly match "START FREE MINING" or "START MINING", never sidebar!)
+          if (!specificBtn || isExcluded(specificBtn)) {
+            const allElements = Array.from(doc.querySelectorAll('a, button, [role="button"]'));
+            specificBtn = (allElements.find((el) => {
+              if (isExcluded(el)) return false;
+              const txt = (el.textContent || '').trim().toUpperCase();
+              return txt.includes('START FREE MINING') || txt === 'START MINING';
+            }) as HTMLElement | null) || null;
+          }
+
+          if (specificBtn && !isExcluded(specificBtn)) {
+            try {
+              specificBtn.click();
+            } catch (e) {}
+
+            const rawHref = specificBtn.getAttribute('href');
+            if (rawHref && !rawHref.startsWith('javascript:') && !rawHref.startsWith('#')) {
+              try {
+                const targetResolved = new URL(rawHref, doc.baseURI || tab.url).href;
+                const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetResolved)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
+                iframe.src = proxyUrl;
+              } catch (e) {}
+            }
+          }
+        }
+      } catch (e) {}
+    };
+
+    // Stagger execution across tabs by 50ms
+    tabs.forEach((tab, index) => {
+      setTimeout(() => {
+        triggerTabMining(tab);
+      }, index * 50);
     });
+
+    // Follow-up check after 1.2s for background tabs
+    setTimeout(() => {
+      tabs.forEach((tab, index) => {
+        setTimeout(() => {
+          triggerTabMining(tab);
+        }, index * 40);
+      });
+    }, 1200);
 
     setTimeout(() => {
       setIsMiningAll(false);
-    }, 1500);
-    setTimeout(() => {
       setBulkStatus('✓ Free Mining triggered in all tabs');
-    }, 1000);
+    }, Math.max(1800, tabs.length * 60));
+
     setTimeout(() => {
       setBulkStatus('');
-    }, 4500);
+    }, 5500);
   };
 
   // Reload the active tab safely without re-rendering all other tabs
