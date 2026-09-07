@@ -125,10 +125,14 @@ Because this application relies on persistent in-memory session cookies and real
 
 ### 1. Render.com (Recommended - Free Web Service)
 1. Link your GitHub repository in the [Render Dashboard](https://dashboard.render.com/).
-2. Select **Web Service**.
+2. Select **Web Service** (Node environment).
 3. Set **Build Command**: `npm run build`
 4. Set **Start Command**: `npm start`
-5. Click **Create Web Service**.
+5. Set **Health Check Path** (optional): `/api/health`
+6. Click **Create Web Service**.
+
+> **Note on 502 Bad Gateway**:
+> Render's free tier spins down web services after 15 minutes of inactivity. When you make your first request, Render can take 30–50 seconds to wake the service up, which may temporarily show a `502 Bad Gateway` while it boots. The server listens on both port `10000` (Render default) and port `3000`, ensuring automatic connection compatibility. Once started, subsequent requests respond instantly.
 
 ### 2. Railway.app
 1. Click **New Project** -> **Deploy from GitHub repo**.

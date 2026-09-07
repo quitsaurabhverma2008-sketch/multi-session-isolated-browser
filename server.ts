@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
 
 interface CookieData {
@@ -1235,7 +1236,6 @@ async function handleProxyRequest(
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
 
   // Health check
   app.get("/api/health", (req, res) => {
@@ -1323,18 +1323,35 @@ async function startServer() {
     next();
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  // Determine if running in production mode (or running the compiled dist/server.cjs)
+  const distPath = path.join(process.cwd(), "dist");
+  const isCjsBundle = typeof __filename !== "undefined" && (__filename.endsWith(".cjs") || __filename.includes("dist"));
+  const isProduction = process.env.NODE_ENV === "production" || isCjsBundle;
+
+  // Vite middleware for development (only when running in tsx dev mode and NOT compiled bundle)
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      const indexFile = path.join(distPath, "index.html");
+      if (fs.existsSync(indexFile)) {
+        res.sendFile(indexFile);
+      } else {
+        res.status(200).send(`
+          <html>
+            <body style="font-family:sans-serif;padding:2rem;background:#0f172a;color:#fff;">
+              <h2>Isolated Browser Engine is Running</h2>
+              <p>Status: Healthy (PID: ${process.pid})</p>
+              <p>Please run <code>npm run build</code> to generate the frontend assets.</p>
+            </body>
+          </html>
+        `);
+      }
     });
   }
 
@@ -1347,9 +1364,32 @@ async function startServer() {
     res.status(500).json({ error: err?.message || "Internal Server Error" });
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[Isolated Browser Engine] Server running on http://localhost:${PORT}`);
+  const primaryPort = Number(process.env.PORT) || 3000;
+
+  const server = app.listen(primaryPort, "0.0.0.0", () => {
+    console.log(`[Isolated Browser Engine] Server running on http://0.0.0.0:${primaryPort}`);
   });
+
+  server.on("error", (err: any) => {
+    console.error(`[Server Port ${primaryPort} Error]`, err.message);
+  });
+
+  // Multi-port binding for Render and cloud environments:
+  // Render routes web traffic to port 10000 by default, while Docker/local often uses 3000.
+  // In production, also bind to the alternate port if available so incoming requests are never 502'd.
+  if (isProduction) {
+    const alternatePorts = [10000, 3000].filter((p) => p !== primaryPort);
+    for (const altPort of alternatePorts) {
+      try {
+        const altServer = app.listen(altPort, "0.0.0.0", () => {
+          console.log(`[Isolated Browser Engine] Also listening on fallback port http://0.0.0.0:${altPort}`);
+        });
+        altServer.on("error", () => {
+          // Port already in use or unavailable - ignore
+        });
+      } catch (e) {}
+    }
+  }
 }
 
 startServer();
