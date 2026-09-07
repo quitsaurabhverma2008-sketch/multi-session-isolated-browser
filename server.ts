@@ -460,6 +460,17 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
     // Trigger Login in this page/tab on command
     if (ev.data.type === 'TRIGGER_LOGIN_SUBMIT') {
       function doSubmit() {
+        // Re-populate credentials if passed and inputs are empty
+        if (ev.data.username || ev.data.password) {
+          const inputs = findLoginInputs();
+          if (inputs.user && ev.data.username && !inputs.user.value) {
+            typeValue(inputs.user, ev.data.username);
+          }
+          if (inputs.pass && ev.data.password && !inputs.pass.value) {
+            typeValue(inputs.pass, ev.data.password);
+          }
+        }
+
         // 1. Find form with password or user inputs
         const forms = Array.from(document.querySelectorAll('form'));
         const loginForm = forms.find(function(f) {
@@ -478,7 +489,7 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
 
           // 2. Identify the specific submit button (e.g. <button type="submit" name="login" class="login_button_detail">Login</button>)
           const specificBtn = loginForm.querySelector(
-            'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], button.btn-login, button[type="submit"], input[type="submit"]'
+            'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], input[type="submit"][value*="login" i], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"], button[type="submit"], input[type="submit"]'
           ) || document.querySelector('button.login_button_detail, button[name="login"]');
 
           // CRITICAL FIX: Ensure button name (like name="login") is sent in POST body even with programmatic submit
@@ -506,9 +517,13 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
 
           // 4. Fire click on submit button AND submit form
           let submitted = false;
-          if (specificBtn && typeof specificBtn.click === 'function') {
+          if (specificBtn) {
             try {
-              specificBtn.click();
+              const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+              specificBtn.dispatchEvent(clickEv);
+              if (typeof specificBtn.click === 'function') {
+                specificBtn.click();
+              }
               submitted = true;
             } catch (e) {}
           }
@@ -544,8 +559,10 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
       }
 
       doSubmit();
-      // Retry once after 350ms to ensure background tabs that were settling process the submit
+      // Multi-wave retry for slow background tabs
       setTimeout(doSubmit, 350);
+      setTimeout(doSubmit, 900);
+      setTimeout(doSubmit, 1600);
     }
 
     // Trigger START FREE MINING in this page/tab on command
@@ -554,9 +571,9 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
         function isExcluded(el) {
           if (!el) return true;
           // STRICT RULE: Never click links inside sidebar navigation, menus, or income reports!
-          if (el.closest('.sidebar-wrapper, .metismenu, nav, .side-mobile-menu, header, footer, .main-menu')) return true;
+          if (el.closest('.sidebar-wrapper, #menu, .metismenu, nav, .side-mobile-menu, header, .topbar, footer, .page-footer, .footer_menu, .main-menu, .dropdown-menu, .user-box')) return true;
           const href = (el.getAttribute('href') || '').toLowerCase();
-          if (href.includes('income/details') || href.includes('source=') || href.includes('logout') || href.includes('register')) return true;
+          if (href.includes('income/details') || href.includes('source=') || href.includes('logout') || href.includes('register') || href.includes('team') || href.includes('profile') || href.includes('orders') || href.includes('support')) return true;
           return false;
         }
 
@@ -576,9 +593,9 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
           }
         }
 
-        // 3. Specific class on mining button
+        // 3. Specific class on mining button outside sidebar
         if (!mineBtn || isExcluded(mineBtn)) {
-          const candidates = Array.from(document.querySelectorAll('a.btn-start-mining.free-btn, a.free-btn, a[href*="order_ids="], a.btn-start-mining'));
+          const candidates = Array.from(document.querySelectorAll('a.btn-start-mining.free-btn, a.free-btn, a[href*="dashboard?order_ids="], a[href*="order_ids="], a.btn-start-mining, #startMiningBtn'));
           mineBtn = candidates.find(el => !isExcluded(el));
         }
 
@@ -588,13 +605,15 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
           mineBtn = allButtons.find(function(el) {
             if (isExcluded(el)) return false;
             const txt = (el.innerText || el.textContent || '').trim().toUpperCase();
-            return txt.includes('START FREE MINING') || txt === 'START MINING';
+            return (txt.includes('START FREE MINING') || txt === 'START MINING') && !txt.includes('PAID');
           });
         }
 
         if (mineBtn && !isExcluded(mineBtn)) {
           try {
-            mineBtn.click();
+            const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+            mineBtn.dispatchEvent(clickEv);
+            if (typeof mineBtn.click === 'function') mineBtn.click();
           } catch (e) {}
 
           const rawHref = mineBtn.getAttribute('href');
@@ -612,7 +631,8 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
       }
 
       doMine();
-      setTimeout(doMine, 350);
+      setTimeout(doMine, 400);
+      setTimeout(doMine, 1100);
     }
   });
 

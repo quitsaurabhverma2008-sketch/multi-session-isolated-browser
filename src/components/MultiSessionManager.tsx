@@ -175,12 +175,16 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
       const iframe = document.getElementById(`multi-tab-frame-${tab.id}`) as HTMLIFrameElement | null;
       if (!iframe) return;
 
+      const creds = pendingAutofillsRef.current.get(tab.id);
+
       // 1. Post message to bridge script inside iframe
       try {
         iframe.contentWindow?.postMessage(
           {
             type: 'TRIGGER_LOGIN_SUBMIT',
-            sessionId: tab.sessionId
+            sessionId: tab.sessionId,
+            username: creds?.username,
+            password: creds?.password
           },
           '*'
         );
@@ -197,6 +201,27 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
               f.querySelector('input[name*="user" i], input[name*="login" i], #user')
           ) || forms[0];
 
+          // Auto-repopulate if inputs are empty
+          if (creds && (creds.username || creds.password)) {
+            const userInp = (loginForm || doc).querySelector(
+              '#user, #username, input[name="username"], input[name="user"], input[name="login"], input.data_input[type="text"], input[type="text"]'
+            ) as HTMLInputElement | null;
+            const passInp = (loginForm || doc).querySelector(
+              '#password, #pass, input[name="password"], input[name="pass"], input[type="password"]'
+            ) as HTMLInputElement | null;
+
+            if (userInp && creds.username && !userInp.value) {
+              userInp.value = creds.username;
+              userInp.dispatchEvent(new Event('input', { bubbles: true }));
+              userInp.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            if (passInp && creds.password && !passInp.value) {
+              passInp.value = creds.password;
+              passInp.dispatchEvent(new Event('input', { bubbles: true }));
+              passInp.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+
           if (loginForm) {
             // Trigger input & change events on inputs
             const inputs = Array.from(loginForm.querySelectorAll('input:not([type="hidden"])'));
@@ -209,7 +234,7 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
 
             // Find submit button
             const specificBtn = loginForm.querySelector(
-              'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], button.btn-login, button[type="submit"], input[type="submit"]'
+              'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], input[type="submit"][value*="login" i], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"], button[type="submit"], input[type="submit"]'
             ) as HTMLElement | null || doc.querySelector('button.login_button_detail, button[name="login"]') as HTMLElement | null;
 
             // Ensure name="login" is sent in POST payload
@@ -239,9 +264,13 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
 
             // Submit form
             let submitted = false;
-            if (specificBtn && typeof specificBtn.click === 'function') {
+            if (specificBtn) {
               try {
-                specificBtn.click();
+                const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView || window });
+                specificBtn.dispatchEvent(clickEv);
+                if (typeof specificBtn.click === 'function') {
+                  specificBtn.click();
+                }
                 submitted = true;
               } catch (e) {}
             }
@@ -272,21 +301,28 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
       } catch (e) {}
     };
 
-    // Stagger submission across tabs by 50ms to prevent browser network stall with 20 tabs
+    // Stagger submission across tabs in 3 progressive waves
     tabs.forEach((tab, index) => {
       setTimeout(() => {
         triggerTabLogin(tab);
-      }, index * 50);
+      }, index * 30);
     });
 
-    // Gentle follow-up retry after 1.5s for any background tab that was delayed
     setTimeout(() => {
       tabs.forEach((tab, index) => {
         setTimeout(() => {
           triggerTabLogin(tab);
-        }, index * 40);
+        }, index * 30);
       });
-    }, 1400);
+    }, 700);
+
+    setTimeout(() => {
+      tabs.forEach((tab, index) => {
+        setTimeout(() => {
+          triggerTabLogin(tab);
+        }, index * 25);
+      });
+    }, 1600);
 
     setTimeout(() => {
       setIsSubmittingAll(false);
@@ -326,15 +362,15 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
           const isExcluded = (el: Element | null): boolean => {
             if (!el) return true;
             // STRICT: Never match links in sidebar navigation, menus, or income reports
-            if (el.closest('.sidebar-wrapper, .metismenu, nav, .side-mobile-menu, header, footer, .main-menu')) return true;
+            if (el.closest('.sidebar-wrapper, #menu, .metismenu, nav, .side-mobile-menu, header, .topbar, footer, .page-footer, .footer_menu, .main-menu, .dropdown-menu, .user-box')) return true;
             const href = (el.getAttribute('href') || '').toLowerCase();
-            if (href.includes('income/details') || href.includes('source=') || href.includes('logout') || href.includes('register')) return true;
+            if (href.includes('income/details') || href.includes('source=') || href.includes('logout') || href.includes('register') || href.includes('team') || href.includes('profile') || href.includes('orders') || href.includes('support')) return true;
             return false;
           };
 
           let specificBtn: HTMLElement | null = null;
 
-          // Check inside .mining_btn container first
+          // Check inside .mining_btn container first (Priority 1)
           const container = doc.querySelector('.mining_btn');
           if (container) {
             specificBtn = container.querySelector('a.free-btn, a.btn-start-mining, a[href*="order_ids="], a') as HTMLElement | null;
@@ -348,10 +384,10 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
             }
           }
 
-          // Direct specific classes
+          // Direct specific classes (outside excluded nav)
           if (!specificBtn || isExcluded(specificBtn)) {
             const candidates = Array.from(
-              doc.querySelectorAll('a.btn-start-mining.free-btn, a.free-btn, a[href*="order_ids="], a.btn-start-mining')
+              doc.querySelectorAll('a.btn-start-mining.free-btn, a.free-btn, a[href*="dashboard?order_ids="], a[href*="order_ids="], a.btn-start-mining, #startMiningBtn')
             );
             specificBtn = (candidates.find((el) => !isExcluded(el)) as HTMLElement | null) || null;
           }
@@ -362,13 +398,17 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
             specificBtn = (allElements.find((el) => {
               if (isExcluded(el)) return false;
               const txt = (el.textContent || '').trim().toUpperCase();
-              return txt.includes('START FREE MINING') || txt === 'START MINING';
+              return (txt.includes('START FREE MINING') || txt === 'START MINING') && !txt.includes('PAID');
             }) as HTMLElement | null) || null;
           }
 
           if (specificBtn && !isExcluded(specificBtn)) {
             try {
-              specificBtn.click();
+              const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView || window });
+              specificBtn.dispatchEvent(clickEv);
+              if (typeof specificBtn.click === 'function') {
+                specificBtn.click();
+              }
             } catch (e) {}
 
             const rawHref = specificBtn.getAttribute('href');
@@ -376,7 +416,15 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
               try {
                 const targetResolved = new URL(rawHref, doc.baseURI || tab.url).href;
                 const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetResolved)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
-                iframe.src = proxyUrl;
+                setTimeout(() => {
+                  try {
+                    if (!iframe.contentWindow?.location.href.includes('order_ids=')) {
+                      iframe.src = proxyUrl;
+                    }
+                  } catch (e) {
+                    iframe.src = proxyUrl;
+                  }
+                }, 200);
               } catch (e) {}
             }
           }
@@ -384,21 +432,20 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
       } catch (e) {}
     };
 
-    // Stagger execution across tabs by 50ms
+    // Stagger execution across tabs
     tabs.forEach((tab, index) => {
       setTimeout(() => {
         triggerTabMining(tab);
-      }, index * 50);
+      }, index * 35);
     });
 
-    // Follow-up check after 1.2s for background tabs
     setTimeout(() => {
       tabs.forEach((tab, index) => {
         setTimeout(() => {
           triggerTabMining(tab);
-        }, index * 40);
+        }, index * 30);
       });
-    }, 1200);
+    }, 800);
 
     setTimeout(() => {
       setIsMiningAll(false);
