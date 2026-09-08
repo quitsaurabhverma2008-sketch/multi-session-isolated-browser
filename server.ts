@@ -324,6 +324,211 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
     document.addEventListener('change', () => queueBroadcast('change'), true);
   }
 
+  // Ensure submit/login buttons are NEVER locked or disabled from user clicks
+  function ensureButtonsInteractive() {
+    try {
+      const candidates = document.querySelectorAll(
+        'button, input[type="submit"], [role="button"], a.btn-start-mining, a.free-btn, .login_button_detail'
+      );
+      candidates.forEach(function(el) {
+        if (el.disabled) {
+          el.disabled = false;
+          el.removeAttribute('disabled');
+        }
+        if (el.classList.contains('disabled')) {
+          el.classList.remove('disabled');
+        }
+        if (el.style.pointerEvents === 'none') {
+          el.style.pointerEvents = 'auto';
+        }
+      });
+    } catch (e) {}
+  }
+
+  // Pre-emptively route forms to absolute proxy URL so <base href> never hijacks submissions
+  function ensureFormProxied(form) {
+    if (!form || form.nodeName !== 'FORM') return;
+    try {
+      const rawAction = form.getAttribute('action') || '';
+      if (!rawAction.startsWith(PROXY_BASE) && !rawAction.startsWith(PROXY_ORIGIN + '/api/proxy')) {
+        const targetAction = resolveTargetUrl(rawAction);
+        const proxiedAction = getProxiedUrl(targetAction);
+        try {
+          HTMLFormElement.prototype.setAttribute.call(form, 'action', proxiedAction);
+          HTMLFormElement.prototype.setAttribute.call(form, 'target', '_self');
+          form.action = proxiedAction;
+        } catch (e) {
+          form.setAttribute('action', proxiedAction);
+        }
+      }
+
+      // Inject hidden input for submit button name (e.g. name="login" value="1")
+      // Crucial for PHP/CodeIgniter backends which check if (isset($_POST['login']))!
+      const btn = form.querySelector('button.login_button_detail, button[name="login"], button[type="submit"][name], input[type="submit"][name]');
+      if (btn) {
+        const bName = btn.getAttribute('name') || 'login';
+        const bVal = btn.getAttribute('value') || '1';
+        if (!form.querySelector('input[type="hidden"][name="' + bName + '"]')) {
+          const hidden = document.createElement('input');
+          hidden.type = 'hidden';
+          hidden.name = bName;
+          hidden.value = bVal;
+          form.appendChild(hidden);
+        }
+      }
+    } catch (e) {}
+  }
+
+  function ensureAllFormsProxied() {
+    try {
+      const forms = document.querySelectorAll('form');
+      forms.forEach(ensureFormProxied);
+      ensureButtonsInteractive();
+    } catch (e) {}
+  }
+
+  function typeValue(input, val) {
+    if (!input || val === undefined || val === null) return;
+    const strVal = String(val);
+    if (input.value === strVal) return;
+    try {
+      const proto = window.HTMLInputElement ? window.HTMLInputElement.prototype : null;
+      const nativeSetter = proto ? Object.getOwnPropertyDescriptor(proto, 'value')?.set : null;
+      if (nativeSetter) {
+        nativeSetter.call(input, strVal);
+      } else {
+        input.value = strVal;
+      }
+      input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } catch (e) {
+      try { input.value = strVal; } catch (e2) {}
+    }
+  }
+
+  function findLoginInputs() {
+    // 1. Direct targeted selector match first (matches exact IDs from user's provided HTML: #user, #password)
+    let user = document.querySelector(
+      '#user, input[name="username"], #username, input[name="user"], input[name="login"], input.data_input[type="text"], input[placeholder*="Username" i], input[placeholder*="User" i]'
+    );
+    let pass = document.querySelector(
+      '#password, input[name="password"], #pass, input[name="pass"], input[name="pwd"], input[type="password"], input.data_input[type="password"], input[placeholder*="Password" i]'
+    );
+
+    if (user && pass) {
+      return { user: user, pass: pass };
+    }
+
+    // 2. Scan all candidate inputs
+    const allInputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="image"])')).filter(el => !el.disabled && !el.readOnly);
+
+    if (!pass) {
+      pass = allInputs.find(function(i) {
+        const t = (i.type || '').toLowerCase();
+        const n = (i.name || '').toLowerCase();
+        const id = (i.id || '').toLowerCase();
+        const ph = (i.placeholder || '').toLowerCase();
+        const ac = (i.getAttribute('autocomplete') || '').toLowerCase();
+        return t === 'password' || n.includes('pass') || n.includes('pwd') || id.includes('pass') || id.includes('pwd') || ph.includes('pass') || ac.includes('password');
+      });
+    }
+
+    if (!user) {
+      user = allInputs.find(function(i) {
+        if (i === pass) return false;
+        const t = (i.type || '').toLowerCase();
+        const n = (i.name || '').toLowerCase();
+        const id = (i.id || '').toLowerCase();
+        const ph = (i.placeholder || '').toLowerCase();
+        const ac = (i.getAttribute('autocomplete') || '').toLowerCase();
+        return t === 'email' || t === 'tel' || n.includes('user') || n.includes('login') || n.includes('email') || n.includes('phone') || n.includes('mobile') || n.includes('account') || n.includes('member') || id.includes('user') || id.includes('login') || id.includes('email') || id.includes('phone') || id.includes('account') || ph.includes('user') || ph.includes('email') || ph.includes('phone') || ph.includes('login') || ac.includes('username') || ac.includes('email');
+      });
+    }
+
+    if (pass && !user) {
+      const pIdx = allInputs.indexOf(pass);
+      if (pIdx > 0) {
+        user = allInputs[pIdx - 1];
+      }
+    }
+
+    if (!user && !pass && allInputs.length >= 2) {
+      user = allInputs[0];
+      pass = allInputs[1];
+    } else if (!user && allInputs.length >= 1) {
+      user = allInputs[0];
+    } else if (!pass && allInputs.length >= 2) {
+      pass = allInputs.find(function(i) { return i !== user; });
+    }
+
+    return { user: user, pass: pass };
+  }
+
+  // Helper function to prepare and route form submissions correctly
+  function prepareAndRouteForm(form, submitEvent) {
+    const rawAction = form.getAttribute('action') || '';
+    const method = (form.getAttribute('method') || 'GET').toUpperCase();
+    const targetAction = resolveTargetUrl(rawAction);
+    const proxiedAction = getProxiedUrl(targetAction);
+
+    notifyNavigating(targetAction);
+
+    if (method === 'GET') {
+      if (submitEvent) submitEvent.preventDefault();
+      const formData = new FormData(form);
+      const targetObj = new URL(targetAction);
+      for (const [key, value] of formData.entries()) {
+        targetObj.searchParams.set(key, typeof value === 'string' ? value : '');
+      }
+      const finalTarget = targetObj.href;
+      notifyNavigating(finalTarget);
+      window.location.href = getProxiedUrl(finalTarget);
+      return false;
+    } else {
+      // POST Form
+      // Ensure button name (like name="login") is sent in POST body
+      try {
+        const btn = form.querySelector('button.login_button_detail, button[name], input[type="submit"][name]');
+        if (btn) {
+          const bName = btn.getAttribute('name') || 'login';
+          const bVal = btn.getAttribute('value') || '1';
+          if (!form.querySelector('input[type="hidden"][name="' + bName + '"]')) {
+            const hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = bName;
+            hidden.value = bVal;
+            form.appendChild(hidden);
+          }
+        }
+      } catch (e) {}
+
+      const currentAction = form.getAttribute('action') || '';
+      const isAlreadyProxied = currentAction.startsWith(PROXY_BASE) || currentAction.startsWith(PROXY_ORIGIN + '/api/proxy');
+
+      try {
+        HTMLFormElement.prototype.setAttribute.call(form, 'action', proxiedAction);
+        HTMLFormElement.prototype.setAttribute.call(form, 'target', '_self');
+        form.action = proxiedAction;
+      } catch (e) {
+        form.setAttribute('action', proxiedAction);
+      }
+
+      // If submit event fired without action being proxied in advance, cancel the unproxied submit
+      // and immediately re-submit via prototype.submit() to the correct proxied URL!
+      if (submitEvent && !isAlreadyProxied) {
+        submitEvent.preventDefault();
+        try {
+          HTMLFormElement.prototype.submit.call(form);
+        } catch (e) {
+          try { form.submit(); } catch (e2) {}
+        }
+        return false;
+      }
+
+      return true;
+    }
+  }
+
   // Allow parent UI to request fresh DOM snapshot on-demand (e.g. when opening source view)
   window.addEventListener('message', function(ev) {
     if (!ev.data) return;
@@ -337,83 +542,6 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
       const password = ev.data.password || '';
       const autoSubmit = Boolean(ev.data.autoSubmit);
 
-      function typeValue(input, val) {
-        if (!input || val === undefined || val === null) return;
-        const strVal = String(val);
-        if (input.value === strVal) return; // Already populated, avoid redundant events
-        try {
-          // CRITICAL: Never invoke input.focus() or dispatch focus/blur events in background tabs/iframes!
-          // Calling focus() across multi-tabs causes the virtual/mobile keyboard to open/close frantically ("blink") and lag.
-          const proto = window.HTMLInputElement ? window.HTMLInputElement.prototype : null;
-          const nativeSetter = proto ? Object.getOwnPropertyDescriptor(proto, 'value')?.set : null;
-          if (nativeSetter) {
-            nativeSetter.call(input, strVal);
-          } else {
-            input.value = strVal;
-          }
-          input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        } catch (e) {
-          try { input.value = strVal; } catch (e2) {}
-        }
-      }
-
-      function findLoginInputs() {
-        // 1. Direct targeted selector match first (works even for background tabs!)
-        let user = document.querySelector('#user, #username, input[name="username"], input[name="user"], input[name="login"], input.data_input[type="text"], input[placeholder*="Username" i], input[placeholder*="User" i]');
-        let pass = document.querySelector('#password, #pass, input[name="password"], input[name="pass"], input[name="pwd"], input[type="password"], input.data_input[type="password"], input[placeholder*="Password" i]');
-
-        if (user && pass) {
-          return { user: user, pass: pass };
-        }
-
-        // 2. Scan all candidate inputs
-        const allInputs = Array.from(document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="image"])')).filter(el => !el.disabled && !el.readOnly);
-
-        if (!pass) {
-          pass = allInputs.find(function(i) {
-            const t = (i.type || '').toLowerCase();
-            const n = (i.name || '').toLowerCase();
-            const id = (i.id || '').toLowerCase();
-            const ph = (i.placeholder || '').toLowerCase();
-            const ac = (i.getAttribute('autocomplete') || '').toLowerCase();
-            return t === 'password' || n.includes('pass') || n.includes('pwd') || id.includes('pass') || id.includes('pwd') || ph.includes('pass') || ac.includes('password');
-          });
-        }
-
-        if (!user) {
-          user = allInputs.find(function(i) {
-            if (i === pass) return false;
-            const t = (i.type || '').toLowerCase();
-            const n = (i.name || '').toLowerCase();
-            const id = (i.id || '').toLowerCase();
-            const ph = (i.placeholder || '').toLowerCase();
-            const ac = (i.getAttribute('autocomplete') || '').toLowerCase();
-            return t === 'email' || t === 'tel' || n.includes('user') || n.includes('login') || n.includes('email') || n.includes('phone') || n.includes('mobile') || n.includes('account') || n.includes('member') || id.includes('user') || id.includes('login') || id.includes('email') || id.includes('phone') || id.includes('account') || ph.includes('user') || ph.includes('email') || ph.includes('phone') || ph.includes('login') || ac.includes('username') || ac.includes('email');
-          });
-        }
-
-        // Fallback: If pass is found, user is the input right before pass!
-        if (pass && !user) {
-          const pIdx = allInputs.indexOf(pass);
-          if (pIdx > 0) {
-            user = allInputs[pIdx - 1];
-          }
-        }
-
-        // Fallback: If 2 visible inputs exist in a form or page, input 0 is user and input 1 is pass!
-        if (!user && !pass && allInputs.length >= 2) {
-          user = allInputs[0];
-          pass = allInputs[1];
-        } else if (!user && allInputs.length >= 1) {
-          user = allInputs[0];
-        } else if (!pass && allInputs.length >= 2) {
-          pass = allInputs.find(function(i) { return i !== user; });
-        }
-
-        return { user: user, pass: pass };
-      }
-
       function attemptFill() {
         const inputs = findLoginInputs();
         let filledAny = false;
@@ -426,6 +554,8 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
           typeValue(inputs.pass, password);
           filledAny = true;
         }
+
+        ensureAllFormsProxied();
 
         try {
           if (window.parent && window.parent !== window) {
@@ -442,7 +572,7 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
         if (autoSubmit && (inputs.pass || inputs.user)) {
           setTimeout(function() {
             const form = (inputs.pass && inputs.pass.form) || (inputs.user && inputs.user.form) || document.querySelector('form');
-            const submitBtn = form ? (form.querySelector('button[type="submit"], input[type="submit"], button:not([type])') || form) : null;
+            const submitBtn = form ? (form.querySelector('button.login_button_detail, button[name="login"], button[type="submit"], input[type="submit"]') || form) : null;
             if (submitBtn && typeof submitBtn.click === 'function') {
               submitBtn.click();
             } else if (form && typeof form.submit === 'function') {
@@ -454,7 +584,6 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
         return { userFound: Boolean(inputs.user), passFound: Boolean(inputs.pass), success: filledAny };
       }
 
-      // Prevent overlapping interval loops if already running
       if (window.__autofill_timer__) {
         clearInterval(window.__autofill_timer__);
         window.__autofill_timer__ = null;
@@ -462,10 +591,9 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
 
       const initResult = attemptFill();
       if (initResult.userFound && initResult.passFound) {
-        return; // Complete, no background polling needed!
+        return;
       }
 
-      // Gentle polling for pages still executing initial scripts (max 4 attempts, 350ms apart)
       let attempts = 0;
       const maxAttempts = 4;
       window.__autofill_timer__ = setInterval(function() {
@@ -478,37 +606,36 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
           }
         }
       }, 350);
-      attemptFill();
     }
 
     // Trigger Login in this page/tab on command
     if (ev.data.type === 'TRIGGER_LOGIN_SUBMIT') {
       function doSubmit() {
-        // Re-populate credentials if passed and inputs are empty
-        if (ev.data.username || ev.data.password) {
-          const inputs = findLoginInputs();
-          if (inputs.user && ev.data.username && !inputs.user.value) {
-            typeValue(inputs.user, ev.data.username);
-          }
-          if (inputs.pass && ev.data.password && !inputs.pass.value) {
-            typeValue(inputs.pass, ev.data.password);
-          }
+        // 1. Re-populate credentials if passed and inputs are empty
+        const inputs = findLoginInputs();
+        if (ev.data.username && inputs.user && !inputs.user.value) {
+          typeValue(inputs.user, ev.data.username);
+        }
+        if (ev.data.password && inputs.pass && !inputs.pass.value) {
+          typeValue(inputs.pass, ev.data.password);
         }
 
-        // 1. Find form with password or user inputs
+        // 2. Identify form and buttons
         const forms = Array.from(document.querySelectorAll('form'));
         const loginForm = forms.find(function(f) {
           return f.querySelector('input[type="password"]') || f.querySelector('input[name*="user" i], input[name*="login" i], #user');
-        }) || forms[0];
+        }) || (inputs.pass && inputs.pass.form) || (inputs.user && inputs.user.form) || forms[0];
 
+        // Specific login button matching user's exact provided source code
+        const specificBtn = (loginForm ? loginForm.querySelector(
+          'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], input[type="submit"][value*="login" i], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"], button[type="submit"], input[type="submit"]'
+        ) : null) || document.querySelector('button.login_button_detail, button.log_in_button, button[name="login"], button#login, input[name="login"][type="submit"]');
+
+        // Ensure buttons and form are completely ready
+        ensureButtonsInteractive();
         if (loginForm) {
-          // If this form is currently in-flight submitting, do not abort with duplicate submit
-          if (loginForm.__is_submitting_now__) {
-            return true;
-          }
-          loginForm.__is_submitting_now__ = true;
-
-          // Trigger input and change events on all form inputs so page validator accepts them
+          ensureFormProxied(loginForm);
+          // Dispatch input and change events so page form validators mark fields as valid
           const formInputs = Array.from(loginForm.querySelectorAll('input:not([type="hidden"])'));
           formInputs.forEach(function(inp) {
             try {
@@ -516,107 +643,57 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
               inp.dispatchEvent(new Event('change', { bubbles: true }));
             } catch (e) {}
           });
+        }
 
-          // 2. Identify the specific submit button (e.g. <button type="submit" name="login" class="login_button_detail">Login</button>)
-          const specificBtn = loginForm.querySelector(
-            'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], input[type="submit"][value*="login" i], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"], button[type="submit"], input[type="submit"]'
-          ) || document.querySelector('button.login_button_detail, button[name="login"]');
+        // 3. EXECUTE TRIGGER
+        let triggered = false;
 
-          // Ensure button is enabled (never permanently locked)
-          if (specificBtn) {
-            specificBtn.disabled = false;
-            specificBtn.removeAttribute('disabled');
-            specificBtn.classList.remove('disabled');
-          }
-
-          // Ensure button name (like name="login") is sent in POST body even with programmatic submit
-          const btnName = (specificBtn && specificBtn.getAttribute('name')) || 'login';
-          if (btnName && !loginForm.querySelector('input[type="hidden"][name="' + btnName + '"]')) {
-            try {
-              const hidden = document.createElement('input');
-              hidden.type = 'hidden';
-              hidden.name = btnName;
-              hidden.value = (specificBtn && specificBtn.getAttribute('value')) || '1';
-              loginForm.appendChild(hidden);
-            } catch (e) {}
-          }
-
-          // 3. Ensure form action routes safely to proxy (absolute URL to prevent <base href> 404s)
-          const rawAction = loginForm.getAttribute('action') || '';
-          const targetAction = resolveTargetUrl(rawAction);
-          const proxiedAction = getProxiedUrl(targetAction);
+        // Priority 1: Click specific button (e.g. <button type="submit" name="login" class="login_button_detail">Login</button>)
+        if (specificBtn) {
           try {
-            HTMLFormElement.prototype.setAttribute.call(loginForm, 'action', proxiedAction);
-            HTMLFormElement.prototype.setAttribute.call(loginForm, 'target', '_self');
+            const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+            specificBtn.dispatchEvent(clickEv);
+            if (typeof specificBtn.click === 'function') {
+              specificBtn.click();
+            }
+            triggered = true;
+          } catch (e) {}
+        }
+
+        // Priority 2: requestSubmit on form
+        if (!triggered && loginForm && typeof loginForm.requestSubmit === 'function') {
+          try {
+            loginForm.requestSubmit(specificBtn || undefined);
+            triggered = true;
+          } catch (e) {}
+        }
+
+        // Priority 3: Form submit() call
+        if (!triggered && loginForm) {
+          try {
+            HTMLFormElement.prototype.submit.call(loginForm);
+            triggered = true;
           } catch (e) {
-            loginForm.setAttribute('action', proxiedAction);
-          }
-
-          // 4. Submit form cleanly ONCE (W3C standard requestSubmit preserves button credentials)
-          let submitted = false;
-          if (typeof loginForm.requestSubmit === 'function' && specificBtn) {
-            try {
-              loginForm.requestSubmit(specificBtn);
-              submitted = true;
-            } catch (e) {}
-          }
-
-          if (!submitted && specificBtn) {
-            try {
-              const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
-              specificBtn.dispatchEvent(clickEv);
-              if (typeof specificBtn.click === 'function') {
-                specificBtn.click();
-              }
-              submitted = true;
-            } catch (e) {}
-          }
-
-          if (!submitted) {
-            try {
-              HTMLFormElement.prototype.submit.call(loginForm);
-            } catch (e) {
-              try { loginForm.submit(); } catch (e2) {}
-            }
-          }
-
-          // After 2.5 seconds, reset submitting lock and ensure button is enabled for user manual taps
-          setTimeout(function() {
-            loginForm.__is_submitting_now__ = false;
-            if (specificBtn) {
-              specificBtn.disabled = false;
-              specificBtn.removeAttribute('disabled');
-              specificBtn.classList.remove('disabled');
-            }
-          }, 2500);
-
-          return true;
-        }
-
-        // Fallback: standalone button
-        const standaloneBtn = document.querySelector(
-          'button.login_button_detail, button.log_in_button, button[name="login"], button#login, input[name="login"][type="submit"]'
-        );
-        if (standaloneBtn) {
-          standaloneBtn.disabled = false;
-          standaloneBtn.removeAttribute('disabled');
-          if (typeof standaloneBtn.click === 'function') {
-            standaloneBtn.click();
-            return true;
+            try { loginForm.submit(); triggered = true; } catch (e2) {}
           }
         }
 
-        return false;
+        // Priority 4: jQuery trigger if present on page
+        if (!triggered && (window as any).$ && (specificBtn || loginForm)) {
+          try {
+            if (specificBtn) (window as any).$(specificBtn).trigger('click');
+            else if (loginForm) (window as any).$(loginForm).trigger('submit');
+            triggered = true;
+          } catch (e) {}
+        }
+
+        return triggered;
       }
 
       doSubmit();
-      // Only gentle fallback after 1.5s if inputs still exist (page didn't navigate)
-      setTimeout(function() {
-        const inputs = findLoginInputs();
-        if (inputs.user || inputs.pass) {
-          doSubmit();
-        }
-      }, 1500);
+      // Retry in 150ms and 500ms in case inputs or DOM were still updating
+      setTimeout(doSubmit, 150);
+      setTimeout(doSubmit, 500);
     }
 
     // Trigger START FREE MINING in this page/tab on command
@@ -750,80 +827,13 @@ function getInspectorBridgeScript(originalUrl: string, sessionId: string): strin
     window.location.href = getProxiedUrl(targetResolved);
   }, true);
 
-  // Helper function to prepare and route form submissions correctly
-  function prepareAndRouteForm(form, submitEvent) {
-    const rawAction = form.getAttribute('action') || '';
-    const method = (form.getAttribute('method') || 'GET').toUpperCase();
-    const targetAction = resolveTargetUrl(rawAction);
-
-    notifyNavigating(targetAction);
-
-    if (method === 'GET') {
-      if (submitEvent) submitEvent.preventDefault();
-      const formData = new FormData(form);
-      const targetObj = new URL(targetAction);
-      for (const [key, value] of formData.entries()) {
-        targetObj.searchParams.set(key, typeof value === 'string' ? value : '');
-      }
-      const finalTarget = targetObj.href;
-      notifyNavigating(finalTarget);
-      window.location.href = getProxiedUrl(finalTarget);
-      return false;
-    } else {
-      // POST Form: Set form action safely via prototype to avoid input[name="action"] collision
-      const proxiedAction = getProxiedUrl(targetAction);
-      try {
-        HTMLFormElement.prototype.setAttribute.call(form, 'action', proxiedAction);
-        HTMLFormElement.prototype.setAttribute.call(form, 'target', '_self');
-      } catch (e) {
-        form.setAttribute('action', proxiedAction);
-      }
-
-      // Ensure button name (like name="login") is sent in POST body
-      try {
-        const btn = form.querySelector('button[name], input[type="submit"][name]');
-        if (btn) {
-          const bName = btn.getAttribute('name');
-          const bVal = btn.getAttribute('value') || '1';
-          if (bName && !form.querySelector('input[type="hidden"][name="' + bName + '"]')) {
-            const hidden = document.createElement('input');
-            hidden.type = 'hidden';
-            hidden.name = bName;
-            hidden.value = bVal;
-            form.appendChild(hidden);
-          }
-        }
-      } catch (e) {}
-
-      return true;
-    }
-  }
-
-  // Ensure submit/login buttons are NEVER locked or disabled from user clicks
-  function ensureButtonsInteractive() {
-    try {
-      const candidates = document.querySelectorAll(
-        'button, input[type="submit"], [role="button"], a.btn-start-mining, a.free-btn'
-      );
-      candidates.forEach(function(el) {
-        if (el.disabled) {
-          el.disabled = false;
-          el.removeAttribute('disabled');
-        }
-        if (el.classList.contains('disabled')) {
-          el.classList.remove('disabled');
-        }
-        if (el.style.pointerEvents === 'none') {
-          el.style.pointerEvents = 'auto';
-        }
-      });
-    } catch (e) {}
-  }
-
-  // Continuously ensure interactive on hover/touch
-  document.addEventListener('pointerdown', ensureButtonsInteractive, true);
-  document.addEventListener('mouseover', ensureButtonsInteractive, true);
-  document.addEventListener('touchstart', ensureButtonsInteractive, true);
+  // Continuously ensure interactive and proxied on user interactions and DOM changes
+  document.addEventListener('pointerdown', ensureAllFormsProxied, true);
+  document.addEventListener('mouseover', ensureAllFormsProxied, true);
+  document.addEventListener('touchstart', ensureAllFormsProxied, true);
+  document.addEventListener('keydown', ensureAllFormsProxied, true);
+  document.addEventListener('DOMContentLoaded', ensureAllFormsProxied);
+  window.addEventListener('load', ensureAllFormsProxied);
 
   // Intercept HTML forms (Multi-step wizards, logins, checkout)
   document.addEventListener('submit', function(e) {

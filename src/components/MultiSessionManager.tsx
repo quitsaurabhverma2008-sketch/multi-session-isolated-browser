@@ -165,176 +165,177 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
     }, 4000);
   };
 
+  // Core function to trigger login on any single tab
+  const triggerTabLogin = (tab: SessionTab) => {
+    if (!tab.url) return;
+    const iframe = document.getElementById(`multi-tab-frame-${tab.id}`) as HTMLIFrameElement | null;
+    if (!iframe) return;
+
+    const creds = pendingAutofillsRef.current.get(tab.id);
+
+    // 1. Post message to isolated bridge script inside iframe
+    try {
+      iframe.contentWindow?.postMessage(
+        {
+          type: 'TRIGGER_LOGIN_SUBMIT',
+          sessionId: tab.sessionId,
+          username: creds?.username,
+          password: creds?.password
+        },
+        '*'
+      );
+    } catch (e) {}
+
+    // 2. Direct DOM assistance (same-origin fallback via /api/proxy)
+    try {
+      const doc = iframe.contentDocument || iframe.contentWindow?.document;
+      if (doc) {
+        // Re-enable all buttons in the tab so manual taps and automatic submit are never locked
+        const allButtons = Array.from(doc.querySelectorAll('button, input[type="submit"], [role="button"], a.btn'));
+        allButtons.forEach((b: any) => {
+          b.disabled = false;
+          b.removeAttribute('disabled');
+          b.classList?.remove('disabled');
+          if (b.style) {
+            b.style.pointerEvents = 'auto';
+          }
+        });
+
+        // Exact match for user's form inputs: #user, #password
+        const userInp = doc.querySelector(
+          '#user, input[name="username"], #username, input[name="user"], input[name="login"], input.data_input[type="text"]'
+        ) as HTMLInputElement | null;
+        const passInp = doc.querySelector(
+          '#password, input[name="password"], #pass, input[name="pass"], input[type="password"], input.data_input[type="password"]'
+        ) as HTMLInputElement | null;
+
+        // Auto-repopulate if inputs are empty and credentials exist
+        if (creds && (creds.username || creds.password)) {
+          if (userInp && creds.username && !userInp.value) {
+            userInp.value = creds.username;
+            userInp.dispatchEvent(new Event('input', { bubbles: true }));
+            userInp.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          if (passInp && creds.password && !passInp.value) {
+            passInp.value = creds.password;
+            passInp.dispatchEvent(new Event('input', { bubbles: true }));
+            passInp.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }
+
+        const forms = Array.from(doc.querySelectorAll('form'));
+        const loginForm = forms.find(
+          (f) =>
+            f.querySelector('input[type="password"]') ||
+            f.querySelector('input[name*="user" i], input[name*="login" i], #user')
+        ) || (userInp && userInp.form) || (passInp && passInp.form) || forms[0];
+
+        // Specific button match from user's provided HTML:
+        // <button type="submit" name="login" class="login_button_detail">Login</button>
+        const specificBtn = (loginForm ? loginForm.querySelector(
+          'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], input[type="submit"][value*="login" i], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"], button[type="submit"], input[type="submit"]'
+        ) : null) as HTMLElement | null || (doc.querySelector(
+          'button.login_button_detail, button.log_in_button, button[name="login"], button#login, input[name="login"][type="submit"]'
+        ) as HTMLElement | null);
+
+        if (specificBtn) {
+          (specificBtn as any).disabled = false;
+          specificBtn.removeAttribute('disabled');
+          specificBtn.classList?.remove('disabled');
+        }
+
+        if (loginForm) {
+          // Trigger input & change events on inputs so validations pass
+          const inputs = Array.from(loginForm.querySelectorAll('input:not([type="hidden"])'));
+          inputs.forEach((inp) => {
+            try {
+              inp.dispatchEvent(new Event('input', { bubbles: true }));
+              inp.dispatchEvent(new Event('change', { bubbles: true }));
+            } catch (e) {}
+          });
+
+          // Ensure name="login" is sent in POST payload (critical for PHP backends)
+          const btnName = (specificBtn && specificBtn.getAttribute('name')) || 'login';
+          const btnVal = (specificBtn && specificBtn.getAttribute('value')) || '1';
+          if (!loginForm.querySelector(`input[type="hidden"][name="${btnName}"]`)) {
+            try {
+              const hidden = doc.createElement('input');
+              hidden.type = 'hidden';
+              hidden.name = btnName;
+              hidden.value = btnVal;
+              loginForm.appendChild(hidden);
+            } catch (e) {}
+          }
+
+          // Route form action to proxy with ABSOLUTE URL (prevent <base href> 404s!)
+          let rawAction = loginForm.getAttribute('action') || '';
+          let targetAction = tab.url;
+          if (rawAction && rawAction.includes('/api/proxy')) {
+            try {
+              const parsed = new URL(rawAction, window.location.origin);
+              targetAction = parsed.searchParams.get('url') || tab.url;
+            } catch (e) {
+              targetAction = tab.url;
+            }
+          } else if (rawAction) {
+            targetAction = new URL(rawAction, doc.baseURI || tab.url).href;
+          }
+
+          const proxiedAction = `${window.location.origin}/api/proxy?url=${encodeURIComponent(targetAction)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
+          try {
+            HTMLFormElement.prototype.setAttribute.call(loginForm, 'action', proxiedAction);
+            HTMLFormElement.prototype.setAttribute.call(loginForm, 'target', '_self');
+          } catch (e) {
+            loginForm.setAttribute('action', proxiedAction);
+          }
+        }
+
+        // TRIGGER EXECUTION:
+        // Priority 1: Direct click on button
+        let submitted = false;
+        if (specificBtn) {
+          try {
+            const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView || window });
+            specificBtn.dispatchEvent(clickEv);
+            if (typeof specificBtn.click === 'function') {
+              specificBtn.click();
+            }
+            submitted = true;
+          } catch (e) {}
+        }
+
+        // Priority 2: requestSubmit on loginForm
+        if (!submitted && loginForm && typeof (loginForm as any).requestSubmit === 'function') {
+          try {
+            (loginForm as any).requestSubmit(specificBtn || undefined);
+            submitted = true;
+          } catch (e) {}
+        }
+
+        // Priority 3: Form submit() call
+        if (!submitted && loginForm) {
+          try {
+            HTMLFormElement.prototype.submit.call(loginForm);
+            submitted = true;
+          } catch (e) {
+            try { loginForm.submit(); submitted = true; } catch (e2) {}
+          }
+        }
+
+        // Re-attempt button click after 250ms for slow/rendering frames
+        setTimeout(() => {
+          if (specificBtn) {
+            try { specificBtn.click(); } catch (e) {}
+          }
+        }, 250);
+      }
+    } catch (e) {}
+  };
+
   // Trigger login button across all tabs in 1 click
   const handleTriggerAllLogin = () => {
     setIsSubmittingAll(true);
     setBulkStatus(`⚡ Logging into all ${tabs.length} tabs...`);
-
-    const triggerTabLogin = (tab: SessionTab) => {
-      if (!tab.url) return;
-      const iframe = document.getElementById(`multi-tab-frame-${tab.id}`) as HTMLIFrameElement | null;
-      if (!iframe) return;
-
-      const creds = pendingAutofillsRef.current.get(tab.id);
-
-      // 1. Post message to isolated bridge script inside iframe
-      try {
-        iframe.contentWindow?.postMessage(
-          {
-            type: 'TRIGGER_LOGIN_SUBMIT',
-            sessionId: tab.sessionId,
-            username: creds?.username,
-            password: creds?.password
-          },
-          '*'
-        );
-      } catch (e) {}
-
-      // 2. Direct DOM assistance (same-origin fallback)
-      try {
-        const doc = iframe.contentDocument || iframe.contentWindow?.document;
-        if (doc) {
-          // Re-enable all buttons in the tab so manual taps and automatic submit are never locked
-          const allButtons = Array.from(doc.querySelectorAll('button, input[type="submit"], [role="button"]'));
-          allButtons.forEach((b: any) => {
-            if (b.disabled) {
-              b.disabled = false;
-              b.removeAttribute('disabled');
-              b.classList.remove('disabled');
-            }
-            if (b.style.pointerEvents === 'none') {
-              b.style.pointerEvents = 'auto';
-            }
-          });
-
-          const forms = Array.from(doc.querySelectorAll('form'));
-          const loginForm = forms.find(
-            (f) =>
-              f.querySelector('input[type="password"]') ||
-              f.querySelector('input[name*="user" i], input[name*="login" i], #user')
-          ) || forms[0];
-
-          // Auto-repopulate if inputs are empty
-          if (creds && (creds.username || creds.password)) {
-            const userInp = (loginForm || doc).querySelector(
-              '#user, #username, input[name="username"], input[name="user"], input[name="login"], input.data_input[type="text"], input[type="text"]'
-            ) as HTMLInputElement | null;
-            const passInp = (loginForm || doc).querySelector(
-              '#password, #pass, input[name="password"], input[name="pass"], input[type="password"]'
-            ) as HTMLInputElement | null;
-
-            if (userInp && creds.username && !userInp.value) {
-              userInp.value = creds.username;
-              userInp.dispatchEvent(new Event('input', { bubbles: true }));
-              userInp.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            if (passInp && creds.password && !passInp.value) {
-              passInp.value = creds.password;
-              passInp.dispatchEvent(new Event('input', { bubbles: true }));
-              passInp.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-          }
-
-          if (loginForm) {
-            // Avoid duplicate submission if already in progress
-            if ((loginForm as any).__submitting__) return;
-            (loginForm as any).__submitting__ = true;
-
-            // Trigger input & change events on inputs so validations pass
-            const inputs = Array.from(loginForm.querySelectorAll('input:not([type="hidden"])'));
-            inputs.forEach((inp) => {
-              try {
-                inp.dispatchEvent(new Event('input', { bubbles: true }));
-                inp.dispatchEvent(new Event('change', { bubbles: true }));
-              } catch (e) {}
-            });
-
-            // Find submit button
-            const specificBtn = loginForm.querySelector(
-              'button.login_button_detail, button.log_in_button, button[name="login"], button.submit_btn_project1, button#login, button#btn-login, input[name="login"][type="submit"], input[type="submit"][value*="login" i], button.btn-login, button[onclick*="weblogin"], button[onclick*="login"], button[type="submit"], input[type="submit"]'
-            ) as HTMLElement | null || doc.querySelector('button.login_button_detail, button[name="login"]') as HTMLElement | null;
-
-            if (specificBtn) {
-              (specificBtn as any).disabled = false;
-              specificBtn.removeAttribute('disabled');
-              specificBtn.classList.remove('disabled');
-            }
-
-            // Ensure name="login" is sent in POST payload
-            const btnName = (specificBtn && specificBtn.getAttribute('name')) || 'login';
-            if (btnName && !loginForm.querySelector(`input[type="hidden"][name="${btnName}"]`)) {
-              try {
-                const hidden = doc.createElement('input');
-                hidden.type = 'hidden';
-                hidden.name = btnName;
-                hidden.value = (specificBtn && specificBtn.getAttribute('value')) || '1';
-                loginForm.appendChild(hidden);
-              } catch (e) {}
-            }
-
-            // Route form action to proxy with ABSOLUTE URL (prevent <base href> 404s!)
-            let rawAction = loginForm.getAttribute('action') || '';
-            let targetAction = tab.url;
-            if (rawAction && rawAction.includes('/api/proxy')) {
-              try {
-                const parsed = new URL(rawAction, window.location.origin);
-                targetAction = parsed.searchParams.get('url') || tab.url;
-              } catch (e) {
-                targetAction = tab.url;
-              }
-            } else if (rawAction) {
-              targetAction = new URL(rawAction, doc.baseURI || tab.url).href;
-            }
-
-            const proxiedAction = `${window.location.origin}/api/proxy?url=${encodeURIComponent(targetAction)}&sessionId=${encodeURIComponent(tab.sessionId)}`;
-            try {
-              HTMLFormElement.prototype.setAttribute.call(loginForm, 'action', proxiedAction);
-              HTMLFormElement.prototype.setAttribute.call(loginForm, 'target', '_self');
-            } catch (e) {
-              loginForm.setAttribute('action', proxiedAction);
-            }
-
-            // Submit form ONCE cleanly using standard requestSubmit
-            let submitted = false;
-            if (typeof (loginForm as any).requestSubmit === 'function' && specificBtn) {
-              try {
-                (loginForm as any).requestSubmit(specificBtn);
-                submitted = true;
-              } catch (e) {}
-            }
-
-            if (!submitted && specificBtn) {
-              try {
-                const clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView || window });
-                specificBtn.dispatchEvent(clickEv);
-                if (typeof specificBtn.click === 'function') {
-                  specificBtn.click();
-                }
-                submitted = true;
-              } catch (e) {}
-            }
-
-            if (!submitted) {
-              try {
-                HTMLFormElement.prototype.submit.call(loginForm);
-              } catch (e) {
-                try { loginForm.submit(); } catch (e2) {}
-              }
-            }
-
-            // Re-enable button after 3s so user can always tap manually
-            setTimeout(() => {
-              (loginForm as any).__submitting__ = false;
-              if (specificBtn) {
-                (specificBtn as any).disabled = false;
-                specificBtn.removeAttribute('disabled');
-                specificBtn.classList.remove('disabled');
-              }
-            }, 3000);
-          }
-        }
-      } catch (e) {}
-    };
 
     // Stagger submission across tabs cleanly (70ms spacing for smooth 30-40 tab execution)
     tabs.forEach((tab, index) => {
@@ -887,6 +888,25 @@ export const MultiSessionManager: React.FC<MultiSessionManagerProps> = ({
         >
           <LogIn className={`w-3.5 h-3.5 ${isSubmittingAll ? 'animate-bounce' : ''}`} />
           <span>{isSubmittingAll ? 'Logging in...' : 'Login All'}</span>
+        </button>
+
+        {/* Login Active Tab Button: Quick test on selected tab */}
+        <button
+          id="btn-login-active-tab"
+          type="button"
+          onClick={() => {
+            const current = tabs.find((t) => t.id === activeTabId);
+            if (current) {
+              triggerTabLogin(current);
+              setBulkStatus(`⚡ Triggered Login on Tab ${activeTabId}`);
+              setTimeout(() => setBulkStatus(''), 3000);
+            }
+          }}
+          className="h-7 px-2 rounded bg-amber-500/20 hover:bg-amber-500/30 active:bg-amber-500/40 text-amber-300 border border-amber-500/40 font-mono text-xs font-medium flex items-center gap-1 shrink-0 cursor-pointer transition-all active:scale-95"
+          title={`Sirf Tab ${activeTabId} me Login button dabayein`}
+        >
+          <LogIn className="w-3 h-3 text-amber-400" />
+          <span>Tab {activeTabId}</span>
         </button>
 
         {/* Mine Button right next to Login button: 1 tap triggers START FREE MINING in all tabs */}
