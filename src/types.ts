@@ -20,6 +20,19 @@ export interface DomMutationEvent {
   summary: string;
 }
 
+export interface RealTimeActivity {
+  id: string;
+  category: 'network' | 'dom' | 'interaction' | 'form' | 'storage' | 'system';
+  title: string;
+  detail: string;
+  timestamp: number;
+  method?: string;
+  status?: number | string;
+  url?: string;
+  selector?: string;
+  dataSnippet?: string;
+}
+
 export interface InspectorState {
   rawHtml: string;
   formattedHtml: string;

@@ -10,11 +10,18 @@ import {
   Compass,
   Lock,
   ExternalLink,
-  Puzzle
+  Puzzle,
+  MoreVertical,
+  Activity,
+  Download,
+  FolderArchive
 } from 'lucide-react';
 import { LiveCodeViewer } from './components/LiveCodeViewer';
 import { ExtensionsModal } from './components/ExtensionsModal';
 import { MultiSessionManager } from './components/MultiSessionManager';
+import { WebSourceInstallerModal } from './components/WebSourceInstallerModal';
+import { RealTimeActivitiesModal } from './components/RealTimeActivitiesModal';
+import { RealTimeActivity } from './types';
 import { 
   getNexusOpsHtml, 
   getFinBankHtml, 
@@ -108,6 +115,10 @@ export default function App() {
   const [searchInput, setSearchInput] = useState<string>(currentUrl);
   const [showQuickLinks, setShowQuickLinks] = useState<boolean>(false);
   const [showExtensionsModal, setShowExtensionsModal] = useState<boolean>(false);
+  const [showToolsMenu, setShowToolsMenu] = useState<boolean>(false);
+  const [showSourceInstaller, setShowSourceInstaller] = useState<boolean>(false);
+  const [showActivitiesModal, setShowActivitiesModal] = useState<boolean>(false);
+  const [activities, setActivities] = useState<RealTimeActivity[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
   // Live DOM State received in real time
@@ -126,6 +137,7 @@ export default function App() {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const searchContainerRef = useRef<HTMLDivElement | null>(null);
   const centerInputRef = useRef<HTMLInputElement | null>(null);
+  const toolsMenuRef = useRef<HTMLDivElement | null>(null);
 
   // Keep session alive indefinitely (heartbeat guarantees session never expires or dies)
   useEffect(() => {
@@ -153,11 +165,14 @@ export default function App() {
     }
   }, [currentUrl]);
 
-  // Click outside to close quick links dropdown
+  // Click outside to close quick links and tools menu dropdowns
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
         setShowQuickLinks(false);
+      }
+      if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target as Node)) {
+        setShowToolsMenu(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -174,6 +189,11 @@ export default function App() {
         return;
       }
 
+      // Handle direct real-time activity stream from bridge
+      if (event.data.type === 'BROWSER_REALTIME_ACTIVITY' && event.data.activity) {
+        setActivities((prev) => [event.data.activity, ...prev].slice(0, 300));
+      }
+
       // 1. Navigation has started inside the iframe (user clicked link, submitted form, redirect)
       if (event.data.type === 'BROWSER_NAVIGATING') {
         const targetNavUrl = event.data.url;
@@ -181,6 +201,19 @@ export default function App() {
           setSearchInput(targetNavUrl);
           setCurrentUrl(targetNavUrl);
           setIsLoading(true);
+
+          setActivities((prev) => [
+            {
+              id: 'nav_' + Math.random().toString(36).substring(2, 9),
+              category: 'network',
+              title: 'Navigation Started',
+              detail: `Navigating to: ${targetNavUrl}`,
+              timestamp: Date.now(),
+              method: 'GET',
+              url: targetNavUrl
+            },
+            ...prev
+          ].slice(0, 300));
         }
       }
 
@@ -194,6 +227,19 @@ export default function App() {
             setPageTitle(event.data.title);
           }
           setIsLoading(false);
+
+          setActivities((prev) => [
+            {
+              id: 'url_' + Math.random().toString(36).substring(2, 9),
+              category: 'network',
+              title: 'Page Document Loaded',
+              detail: `Active document: ${event.data.title || 'Web Page'} (${newUrl})`,
+              timestamp: Date.now(),
+              status: 200,
+              url: newUrl
+            },
+            ...prev
+          ].slice(0, 300));
         }
       }
 
@@ -212,6 +258,18 @@ export default function App() {
               localStorage.setItem(STORAGE_HTML_KEY, event.data.html);
             }
           } catch {}
+
+          setActivities((prev) => [
+            {
+              id: 'dom_' + Math.random().toString(36).substring(2, 9),
+              category: 'dom',
+              title: 'DOM Mutation Synced',
+              detail: `Synchronized ${event.data.nodeCount || 0} nodes from ${event.data.title || 'page'}`,
+              timestamp: Date.now(),
+              selector: event.data.activeElement || 'document'
+            },
+            ...prev
+          ].slice(0, 300));
         }
         const newUrl = event.data.originalUrl || event.data.url;
         if (newUrl && !newUrl.includes('about:blank')) {
@@ -271,6 +329,22 @@ export default function App() {
     setSearchInput(resolved);
     setIframeTargetUrl(resolved);
     setShowQuickLinks(false);
+
+    if (resolved) {
+      setActivities((prev) => [
+        {
+          id: 'act_' + Math.random().toString(36).substring(2, 9),
+          category: 'network',
+          title: 'User Navigated',
+          detail: `Navigated to: ${resolved}`,
+          timestamp: Date.now(),
+          method: 'GET',
+          url: resolved
+        },
+        ...prev
+      ].slice(0, 300));
+    }
+
     setTimeout(() => setIsLoading(false), 600);
   }, []);
 
@@ -291,6 +365,18 @@ export default function App() {
         iframeRef.current.src = iframeRef.current.src;
       }
     }
+    setActivities((prev) => [
+      {
+        id: 'act_' + Math.random().toString(36).substring(2, 9),
+        category: 'network',
+        title: 'Page Reloaded',
+        detail: `Reloading frame: ${currentUrl}`,
+        timestamp: Date.now(),
+        method: 'GET',
+        url: currentUrl
+      },
+      ...prev
+    ].slice(0, 300));
     setTimeout(() => setIsLoading(false), 500);
   };
 
@@ -341,6 +427,93 @@ export default function App() {
     <div className="w-screen h-screen min-h-screen max-h-screen overflow-hidden bg-black text-white flex flex-col font-sans select-none">
       {/* TOP BAR: Single Minimalist Browser Header */}
       <header className="h-11 bg-black border-b border-neutral-900 px-3 flex items-center gap-2 shrink-0 z-50">
+        
+        {/* 3-DOTS MENU BUTTON ON THE LEFT SIDE */}
+        <div ref={toolsMenuRef} className="relative shrink-0">
+          <button
+            id="btn-xbrowse-tools-menu"
+            onClick={() => setShowToolsMenu((prev) => !prev)}
+            className={`h-7 w-7 rounded flex items-center justify-center transition-colors cursor-pointer border ${
+              showToolsMenu
+                ? 'bg-neutral-800 text-white border-neutral-700'
+                : 'bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white border-neutral-800 hover:border-neutral-700'
+            }`}
+            title="xbrowse Site Tools (Real-Time Activities & Web Source Code)"
+          >
+            <MoreVertical className="w-4 h-4" />
+          </button>
+
+          {/* 3-DOTS DROPDOWN MENU */}
+          {showToolsMenu && (
+            <div className="absolute left-0 top-full mt-1.5 w-72 bg-[#0C0F17] border border-neutral-800 rounded-xl shadow-2xl p-1.5 z-50 animate-in fade-in zoom-in-95 font-sans">
+              <div className="px-3 py-1.5 border-b border-neutral-800/80 flex items-center justify-between text-[10px] font-mono uppercase font-semibold text-neutral-400">
+                <span>xbrowse Site Tools</span>
+                <span className="text-emerald-400 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Live
+                </span>
+              </div>
+
+              <div className="py-1 space-y-1">
+                {/* 1. See Real-Time Activities */}
+                <button
+                  id="menu-opt-realtime-activities"
+                  onClick={() => {
+                    setShowToolsMenu(false);
+                    setShowActivitiesModal(true);
+                  }}
+                  className="w-full text-left px-3 py-2 rounded-lg hover:bg-neutral-900/90 transition-colors flex items-center space-x-3 group cursor-pointer border border-transparent hover:border-neutral-800"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400 group-hover:bg-sky-500 group-hover:text-white transition-all shrink-0">
+                    <Activity className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-white group-hover:text-sky-300 transition-colors">
+                        See Real-Time Activities
+                      </span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    </div>
+                    <p className="text-[10px] text-neutral-400 truncate mt-0.5 font-mono">
+                      Live network, DOM, clicks & events
+                    </p>
+                  </div>
+                </button>
+
+                {/* 2. Install the Web Source Code */}
+                <button
+                  id="menu-opt-install-source"
+                  onClick={() => {
+                    setShowToolsMenu(false);
+                    setShowSourceInstaller(true);
+                  }}
+                  className="w-full text-left px-3 py-2 rounded-lg hover:bg-neutral-900/90 transition-colors flex items-center space-x-3 group cursor-pointer border border-transparent hover:border-neutral-800"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 group-hover:bg-emerald-500 group-hover:text-black transition-all shrink-0">
+                    <Download className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-white group-hover:text-emerald-300 transition-colors">
+                        Install Web Source Code
+                      </span>
+                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-400 font-mono border border-emerald-800">
+                        .ZIP
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-neutral-400 truncate mt-0.5 font-mono">
+                      Full HTML, CSS, JS + Python Workframe
+                    </p>
+                  </div>
+                </button>
+              </div>
+
+              <div className="pt-1.5 px-3 pb-1 border-t border-neutral-800/80 text-[10px] text-neutral-500 font-mono flex items-center justify-between">
+                <span>Active: <span className="text-neutral-300">{pageTitle || 'Web Page'}</span></span>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* SINGLE TOGGLE BUTTON ON THE LEFT OF SEARCH BAR */}
         <button
           id="btn-toggle-view"
@@ -620,6 +793,24 @@ export default function App() {
         isOpen={showExtensionsModal}
         onClose={() => setShowExtensionsModal(false)}
         onOpenMultiSession={() => setViewMode('multi-session')}
+        currentUrl={currentUrl}
+      />
+
+      {/* WEB SOURCE CODE & WORKFRAME INSTALLER MODAL */}
+      <WebSourceInstallerModal
+        isOpen={showSourceInstaller}
+        onClose={() => setShowSourceInstaller(false)}
+        rawHtml={rawHtml}
+        currentUrl={currentUrl}
+        pageTitle={pageTitle}
+      />
+
+      {/* REAL-TIME ACTIVITIES MODAL */}
+      <RealTimeActivitiesModal
+        isOpen={showActivitiesModal}
+        onClose={() => setShowActivitiesModal(false)}
+        activities={activities}
+        onClearActivities={() => setActivities([])}
         currentUrl={currentUrl}
       />
     </div>
